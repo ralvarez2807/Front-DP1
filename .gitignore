@@ -1,0 +1,73 @@
+# ── Dependencias ──────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Builds y caches ───────────────────────────────────────────
+dist/
+build/
+out/
+coverage/
+.vite/
+.cache/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# ── Secretos y credenciales — NUNCA subir ─────────────────────
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+*.p8
+.secrets/
+secrets/
+*credentials*.json
+*service-account*.json
+*service_account*.json
+google-*.json
+gcp-*.json
+*token*.json
+auth.json
+
+# ── Docker overrides ──────────────────────────────────────────
+docker-compose.override.yml
+.dockerenv
+
+# ── IDEs y editores ───────────────────────────────────────────
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+.history/
+*.orig
+
+# ── Sistema operativo ─────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# ── Archivos temporales y basura ──────────────────────────────
+*.bak
+*.tmp
+*.tgz
+~*
