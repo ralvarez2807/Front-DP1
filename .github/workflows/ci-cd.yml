@@ -48,7 +48,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
-            cd ${{ secrets.SERVER_FRONT_DIR }}/Front
+            cd /home/1inf54.982.6f/front/Front
             git pull origin main
             npm ci
             npm run build
