@@ -1,0 +1,51 @@
+name: CI/CD Backend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-ci:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: Build and test
+        working-directory: Simulador/com.tasf.b2b
+        run: mvn clean verify -DskipTests
+
+  deploy:
+    name: Deploy to Servidor PUCP
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+            export PATH=$JAVA_HOME/bin:$PATH
+            cd ${{ secrets.SERVER_BACK_DIR }}/Simulador/com.tasf.b2b
+            git pull origin main
+            mvn clean package -DskipTests
+            sudo systemctl restart backend
+            sleep 20
+            sudo systemctl status backend --no-pager
+            echo "✅ Backend desplegado"
