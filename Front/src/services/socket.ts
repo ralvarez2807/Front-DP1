@@ -1,6 +1,7 @@
 type SocketCallback = (data: any) => void;
 
 interface SocketMessage {
+  seq?: number;
   type: string;
   simTime?: string;
   payload: any;
@@ -11,12 +12,13 @@ class SocketService {
   private listeners: Map<string, Set<SocketCallback>> = new Map();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
-  private lastProcessedSequence: Map<string, number> = new Map();
+  private lastSeq = -1;
   private intentionalDisconnect = false;
 
   connect(sessionId: string) {
     this.intentionalDisconnect = false;
     this.reconnectAttempts = 0;
+    this.lastSeq = -1;
 
     if (this.socket) {
       this.socket.onclose = null;
@@ -59,11 +61,17 @@ class SocketService {
       this.socket.onmessage = (event) => {
         try {
           const message: SocketMessage = JSON.parse(event.data);
+          const { seq } = message;
 
-          if ((message as any).sequenceNumber !== undefined) {
-            const lastSeq = this.lastProcessedSequence.get(message.type) ?? -1;
-            if ((message as any).sequenceNumber <= lastSeq) return;
-            this.lastProcessedSequence.set(message.type, (message as any).sequenceNumber);
+          if (seq !== undefined) {
+            if (seq <= this.lastSeq) return;
+
+            if (this.lastSeq !== -1 && seq !== this.lastSeq + 1) {
+              console.warn(`[Socket] Gap detected: expected seq ${this.lastSeq + 1}, got ${seq}`);
+              this.emit('RESYNC_NEEDED', { sessionId });
+            }
+
+            this.lastSeq = seq;
           }
 
           this.emit(message.type, { simTime: message.simTime, payload: message.payload });

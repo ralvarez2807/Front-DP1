@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Play, Pause, RotateCcw, Settings2, Database, Zap, Activity } from 'lucide-react';
 import { SCENARIOS, SCENARIO_LABELS } from '../constants/domain';
 import { useSimulationContext } from '../providers/SimulationProvider';
+import { hubService } from '../services/hubService';
 import { cn } from '../lib/utils';
 import { HUBS } from '../models/infrastructure';
 
@@ -10,9 +11,27 @@ export const SimulationView: React.FC = () => {
   const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault, isLoading } = useSimulationContext();
   const [selectedScenario, setSelectedScenario] = useState<any>(SCENARIOS.DAILY);
   const [selectedHub, setSelectedHub] = useState(HUBS[0].id);
+  const [availableDays, setAvailableDays] = useState<string[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string>('');
+  const [daysLoading, setDaysLoading] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDaysLoading(true);
+    hubService.getAvailableDays(controller.signal)
+      .then(days => {
+        const sorted = [...days].sort();
+        setAvailableDays(sorted);
+        if (sorted.length > 0) setSelectedDate(sorted[0]);
+      })
+      .catch(() => {})
+      .finally(() => setDaysLoading(false));
+    return () => controller.abort();
+  }, []);
 
   const handleCreate = async () => {
-    await createSession(selectedScenario);
+    if (!selectedDate) return;
+    await createSession(selectedScenario, selectedDate);
   };
 
   return (
@@ -52,10 +71,30 @@ export const SimulationView: React.FC = () => {
               </select>
             </div>
             
-            <button 
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Fecha de Inicio</label>
+              {daysLoading ? (
+                <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 text-sm text-slate-400">Cargando fechas disponibles…</div>
+              ) : availableDays.length === 0 ? (
+                <div className="w-full bg-rose-50 border border-rose-200 rounded-2xl px-6 py-4 text-sm text-rose-500 font-bold">Sin fechas disponibles en el servidor</div>
+              ) : (
+                <select
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors"
+                  disabled={isLoading}
+                >
+                  {availableDays.map(day => (
+                    <option key={day} value={day}>{day}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <button
               onClick={handleCreate}
-              disabled={isLoading}
-              className="w-full py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold text-sm transition-all active:scale-[0.98] shadow-xl shadow-blue-600/20 flex items-center justify-center gap-3"
+              disabled={isLoading || !selectedDate || availableDays.length === 0}
+              className="w-full py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold text-sm transition-all active:scale-[0.98] shadow-xl shadow-blue-600/20 flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Database size={18} />
               {isLoading ? 'Inicializando...' : 'Inicializar Motor de Simulación'}

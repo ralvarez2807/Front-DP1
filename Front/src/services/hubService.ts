@@ -14,5 +14,10 @@ export const hubService = {
       storageCapacity: a.capacity,
       currentStorage: 0,
     }));
-  }
+  },
+
+  getAvailableDays: async (signal?: AbortSignal): Promise<string[]> => {
+    const response = await api.get('/data/available-days', { signal });
+    return response.data.availableDates as string[];
+  },
 };

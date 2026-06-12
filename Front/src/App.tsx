@@ -31,8 +31,8 @@ function formatTime(d: Date) {
 
 // ── App ─────────────────────────────────────────────────────────────────────
 function AppContent() {
-  const { hubs, flights, shipments } = useNetworkData();
   const { user, logout, isAuthenticated, login } = useAuthContext();
+  const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
   const { session } = useSimulationContext();
 
   const [activeView, setActiveView] = useState<View>('dashboard');

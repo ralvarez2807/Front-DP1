@@ -37,22 +37,17 @@ function toOperationalEvent(type: BackendEventType, payload: any, simTime?: stri
   };
 }
 
-function computeDateRange(scenario: SimulationScenario, startDate?: string): { simStart: string; simEnd: string } {
-  const now = new Date();
-  if (scenario === SCENARIOS.PERIOD_5D && startDate) {
-    const start = new Date(startDate + 'T00:00:00');
-    const end = new Date(start);
+function computeDateRange(scenario: SimulationScenario, startDate: string): { simStart: string; simEnd: string } {
+  const start = new Date(startDate + 'T00:00:00');
+  const end = new Date(start);
+  if (scenario === SCENARIOS.PERIOD_5D) {
     end.setDate(end.getDate() + 5);
-    return { simStart: start.toISOString(), simEnd: end.toISOString() };
-  }
-  if (scenario === SCENARIOS.COLLAPSE) {
-    const end = new Date(now);
+  } else if (scenario === SCENARIOS.COLLAPSE) {
     end.setDate(end.getDate() + 30);
-    return { simStart: now.toISOString(), simEnd: end.toISOString() };
+  } else {
+    end.setDate(end.getDate() + 1);
   }
-  const end = new Date(now);
-  end.setDate(end.getDate() + 1);
-  return { simStart: now.toISOString(), simEnd: end.toISOString() };
+  return { simStart: start.toISOString(), simEnd: end.toISOString() };
 }
 
 interface SimulationContextType {
@@ -61,7 +56,9 @@ interface SimulationContextType {
   criticalPoints: CriticalPoint[];
   isLoading: boolean;
   error: string | null;
-  createSession: (scenario: SimulationScenario, startDate?: string) => Promise<void>;
+  restoredFlights: any[];
+  clearRestoredFlights: () => void;
+  createSession: (scenario: SimulationScenario, startDate: string) => Promise<void>;
   startSimulation: () => Promise<void>;
   pauseSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
@@ -77,6 +74,36 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [events, setEvents] = useState<OperationalEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [restoredFlights, setRestoredFlights] = useState<any[]>([]);
+  const clearRestoredFlights = useCallback(() => setRestoredFlights([]), []);
+
+  // ── Rehidratación via GET /simulations/mine ───────────────────────────────
+  useEffect(() => {
+    simulationService.getMine()
+      .then(mine => {
+        if (!mine) return;
+        const status = mine.status?.toLowerCase() as SimulationSession['status'];
+        if (status === 'stopped' || status === 'completed') return;
+
+        const savedConfig = localStorage.getItem('simulation_config');
+        const config: { scenario: SimulationScenario; speed: number } = savedConfig
+          ? JSON.parse(savedConfig)
+          : { scenario: 'period_5d' as SimulationScenario, speed: 1 };
+
+        simulationService.getSnapshotRaw(mine.id)
+          .then(snapshot => {
+            setSession(simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config));
+            const inFlight = (snapshot.flights ?? [])
+              .filter((f: any) => f.status === 'IN_FLIGHT')
+              .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
+            if (inFlight.length > 0) setRestoredFlights(inFlight);
+            socketService.connect(mine.id);
+          })
+          .catch(() => {});
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const unsubs = BACKEND_EVENTS.map(eventType =>
@@ -97,28 +124,88 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return () => unsubs.forEach(u => u());
   }, [socket]);
 
-  // ── Polling de respaldo: actualiza tiempo aunque el WS tarde en llegar ────
-  // GET /api/v1/simulations/{id} cada 4 s cuando la sesión está running.
-  // Los eventos WebSocket siguen siendo la fuente principal; este polling es
-  // simplemente el safety-net para que el reloj no se quede en T+0h.
+  // ── SIM_STATUS: transiciones de estado enviadas por el backend ───────────
   useEffect(() => {
-    if (!session?.id || session.status !== 'running') return;
+    const unsub = socket.on('SIM_STATUS', ({ payload }: { payload: { status: string } }) => {
+      const status = payload?.status?.toLowerCase() as SimulationSession['status'];
+      if (!status) return;
+      if (status === 'stopped' || status === 'completed') {
+        socketService.disconnect();
+        localStorage.removeItem('simulation_config');
+        setSession(null);
+        setEvents([]);
+        addToast(status === 'completed' ? 'Simulación completada' : 'Simulación detenida externamente', 'info');
+        return;
+      }
+      setSession(prev => prev ? { ...prev, status } : null);
+    });
+    return unsub;
+  }, [socket, addToast]);
+
+  // ── Resync por gap en seq del WebSocket ───────────────────────────────────
+  useEffect(() => {
+    if (!session?.id) return;
+    const sessionId = session.id;
+    const config    = session.config;
+
+    const unsub = socket.on('RESYNC_NEEDED', async () => {
+      try {
+        const raw = await simulationService.getSnapshotRaw(sessionId);
+        const restored = simulationService.mapSessionPublic({ ...raw, id: sessionId }, config);
+        setSession(prev => prev ? { ...restored, config: prev.config } : null);
+        const inFlight = (raw.flights ?? [])
+          .filter((f: any) => f.status === 'IN_FLIGHT')
+          .map((f: any) => ({ ...f, simTime: raw.simTime }));
+        if (inFlight.length > 0) setRestoredFlights(inFlight);
+      } catch (e) {
+        console.error('[Sim] Snapshot resync failed', e);
+      }
+    });
+
+    return unsub;
+  }, [session?.id, socket]);
+
+  // ── Polling de respaldo: sincroniza estado aunque el WS no llegue ─────────
+  useEffect(() => {
+    const TERMINAL = new Set(['stopped', 'completed']);
+    const ACTIVE   = new Set(['starting', 'running', 'paused']);
+    if (!session?.id || !ACTIVE.has(session.status)) return;
+
     const sessionId = session.id;
     const config    = session.config;
 
     const poll = async () => {
       try {
         const updated = await simulationService.getSession(sessionId, config);
+
+        if (TERMINAL.has(updated.status)) {
+          socketService.disconnect();
+          localStorage.removeItem('simulation_config');
+          setSession(null);
+          setEvents([]);
+          addToast(
+            updated.status === 'completed' ? 'Simulación completada' : 'Simulación detenida externamente',
+            'info'
+          );
+          return;
+        }
+
         setSession(prev => {
           if (!prev) return null;
-          // Solo actualizar si el backend reporta más tiempo del que tenemos
-          if (updated.currentTimeAt > prev.currentTimeAt) {
-            return { ...prev, currentTimeAt: updated.currentTimeAt, status: updated.status };
-          }
-          return prev;
+          return {
+            ...prev,
+            currentTimeAt: Math.max(prev.currentTimeAt, updated.currentTimeAt),
+            status: updated.status,
+          };
         });
-      } catch {
-        // ignora errores de red temporales
+      } catch (e: any) {
+        if (e?.statusCode === 404) {
+          socketService.disconnect();
+          localStorage.removeItem('simulation_config');
+          setSession(null);
+          setEvents([]);
+          addToast('La sesión ya no existe en el servidor', 'warning');
+        }
       }
     };
 
@@ -127,13 +214,32 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.status]);
 
-  const createSession = useCallback(async (scenario: SimulationScenario, startDate?: string) => {
+  const createSession = useCallback(async (scenario: SimulationScenario, startDate: string) => {
     setIsLoading(true);
     const controller = new AbortController();
     try {
       const { simStart, simEnd } = computeDateRange(scenario, startDate);
       const config = { scenario, speed: 1 };
-      const newSession = await simulationService.createSession(simStart, simEnd, config, controller.signal);
+      localStorage.setItem('simulation_config', JSON.stringify(config));
+      let newSession: SimulationSession;
+      try {
+        newSession = await simulationService.createSession(simStart, simEnd, config, controller.signal);
+      } catch (err: any) {
+        if (err?.statusCode === 409) {
+          // Ya existe una sesión activa — la recuperamos
+          const mine = await simulationService.getMine(controller.signal);
+          if (!mine) throw err;
+          const snapshot = await simulationService.getSnapshotRaw(mine.id, controller.signal);
+          newSession = simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config);
+          const inFlight = (snapshot.flights ?? [])
+            .filter((f: any) => f.status === 'IN_FLIGHT')
+            .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
+          if (inFlight.length > 0) setRestoredFlights(inFlight);
+          addToast('Sesión existente recuperada', 'info');
+        } else {
+          throw err;
+        }
+      }
       setSession(newSession);
       setEvents([]);
       setError(null);
@@ -175,6 +281,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     try {
       await simulationService.stop(session.id);
       socketService.disconnect();
+      localStorage.removeItem('simulation_config');
       setSession(null);
       setEvents([]);
       addToast('Simulación detenida', 'info');
@@ -193,12 +300,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     criticalPoints: [] as CriticalPoint[],
     isLoading,
     error,
+    restoredFlights,
+    clearRestoredFlights,
     createSession,
     startSimulation,
     pauseSimulation,
     resetSimulation,
     injectFault,
-  }), [session, events, isLoading, error, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
+  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
 
   return (
     <SimulationContext.Provider value={value}>

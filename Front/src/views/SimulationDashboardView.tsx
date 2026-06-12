@@ -9,6 +9,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useSimulationContext } from '../providers/SimulationProvider';
 import { useSocket } from '../providers/SocketProvider';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
+import { hubService } from '../services/hubService';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 
@@ -176,7 +177,7 @@ function AnimatedPlane({
 
 // ── Vista principal ────────────────────────────────────────────────────────
 export const SimulationDashboardView: React.FC = () => {
-  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading } = useSimulationContext();
+  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
 
@@ -368,6 +369,61 @@ export const SimulationDashboardView: React.FC = () => {
     return () => { unsubDep(); unsubArr(); };
   }, [socket]);
 
+  // ── Restaurar aviones IN_FLIGHT desde snapshot (nueva pestaña / resync) ──
+  useEffect(() => {
+    if (restoredFlights.length === 0) return;
+
+    const planes: ActivePlane[] = [];
+    const seen: SeenFlight[] = [];
+
+    restoredFlights.forEach((f: any) => {
+      const depMs  = new Date(f.depTime).getTime();
+      const arrMs  = new Date(f.arrTime).getTime();
+      const simNow = new Date(f.simTime).getTime();
+
+      const simFlightMs  = arrMs - depMs;
+      const durationMs   = Math.max(30_000, Math.round(simFlightMs / VISUAL_SPEED));
+      const simElapsedMs = Math.max(0, simNow - depMs);
+      const startedAt    = Date.now() - Math.round(simElapsedMs / VISUAL_SPEED);
+
+      const key = `${f.flightId}-${f.fromIcao}-${f.toIcao}`;
+
+      // Timer de limpieza cuando termine la animación visual
+      const remaining = durationMs - (Date.now() - startedAt);
+      if (remaining > 0) {
+        const timer = setTimeout(() => {
+          setActivePlanes(prev => prev.filter(p => p.key !== key));
+          planeTimersRef.current.delete(key);
+        }, remaining + 500);
+        planeTimersRef.current.set(key, timer);
+      }
+
+      planes.push({
+        key,
+        flightId: f.flightId,
+        fromIcao: f.fromIcao,
+        toIcao:   f.toIcao,
+        startedAt,
+        durationMs,
+        capacity: f.capacity ?? 0,
+        occupied: f.load ?? 0,
+      });
+
+      seen.push({ flightId: f.flightId, fromIcao: f.fromIcao, toIcao: f.toIcao, seenAt: Date.now(), isActive: true });
+    });
+
+    setActivePlanes(prev => {
+      const existingKeys = new Set(prev.map(p => p.key));
+      return [...prev, ...planes.filter(p => !existingKeys.has(p.key))];
+    });
+    setSeenFlights(prev => {
+      const existingIds = new Set(prev.map(f => f.flightId));
+      return [...seen.filter(f => !existingIds.has(f.flightId)), ...prev].slice(0, 100);
+    });
+
+    clearRestoredFlights();
+  }, [restoredFlights, clearRestoredFlights]);
+
   // Al resetear la simulación, limpiar historial y timers pendientes
   useEffect(() => {
     if (!session) {
@@ -383,20 +439,33 @@ export const SimulationDashboardView: React.FC = () => {
   // ── Escenario ────────────────────────────────────────────────────────────
   const [selectedScenario, setSelectedScenario] = useState<SimulationScenario>(SCENARIOS.PERIOD_5D);
   const [startDate, setStartDate] = useState('');
+  const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [showCollapseWarning, setShowCollapseWarning] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    hubService.getAvailableDays(controller.signal)
+      .then(days => {
+        const sorted = [...days].sort();
+        setAvailableDays(sorted);
+        if (sorted.length > 0) setStartDate(sorted[0]);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
 
   const handleCreate = useCallback(async () => {
     if (selectedScenario === SCENARIOS.COLLAPSE) {
       setShowCollapseWarning(true);
       return;
     }
-    await createSession(selectedScenario, selectedScenario === SCENARIOS.PERIOD_5D ? startDate : undefined);
+    await createSession(selectedScenario, startDate);
   }, [selectedScenario, startDate, createSession]);
 
   const confirmCollapse = useCallback(async () => {
     setShowCollapseWarning(false);
-    await createSession(SCENARIOS.COLLAPSE);
-  }, [createSession]);
+    await createSession(SCENARIOS.COLLAPSE, startDate);
+  }, [createSession, startDate]);
 
   // ── Filtro de vuelos ─────────────────────────────────────────────────────
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
@@ -945,12 +1014,21 @@ export const SimulationDashboardView: React.FC = () => {
                   <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 block">
                     Fecha de inicio
                   </label>
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={e => setStartDate(e.target.value)}
-                    className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
-                  />
+                  {availableDays.length === 0 ? (
+                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-400">
+                      Cargando fechas disponibles…
+                    </div>
+                  ) : (
+                    <select
+                      value={startDate}
+                      onChange={e => setStartDate(e.target.value)}
+                      className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
+                    >
+                      {availableDays.map(d => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               )}
 
@@ -993,15 +1071,22 @@ export const SimulationDashboardView: React.FC = () => {
               <div className="flex gap-2">
                 <button
                   onClick={simRunning ? pauseSimulation : startSimulation}
+                  disabled={session.status === 'starting'}
                   className={cn(
                     'flex-1 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all',
-                    simRunning
-                      ? 'bg-amber-500 hover:bg-amber-400 text-white'
-                      : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                    session.status === 'starting'
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : simRunning
+                        ? 'bg-amber-500 hover:bg-amber-400 text-white'
+                        : 'bg-emerald-500 hover:bg-emerald-400 text-white'
                   )}
                 >
-                  {simRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                  {simRunning ? 'Pausar' : 'Reanudar'}
+                  {session.status === 'starting'
+                    ? <><span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />Iniciando…</>
+                    : simRunning
+                      ? <><Pause className="w-4 h-4" />Pausar</>
+                      : <><Play className="w-4 h-4" />Reanudar</>
+                  }
                 </button>
                 <button
                   onClick={resetSimulation}

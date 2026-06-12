@@ -62,7 +62,7 @@ export interface OperationalEvent {
 
 export interface SimulationSession {
   id: string;
-  status: 'initializing' | 'running' | 'paused' | 'completed' | 'failed';
+  status: 'starting' | 'running' | 'paused' | 'completed' | 'stopped';
   startTimeAt: string;
   currentTimeAt: number; // operational time
   lastProcessedSequence?: number; // For synchronization

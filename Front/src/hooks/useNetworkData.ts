@@ -4,7 +4,7 @@ import { Shipment } from '../models/operational';
 import { hubService } from '../services/hubService';
 import { flightService } from '../services/flightService';
 
-export function useNetworkData() {
+export function useNetworkData(isAuthenticated = true) {
   const [hubs, setHubs] = useState<Hub[]>([]);
   const [flights, setFlights] = useState<Flight[]>([]);
   const [shipments] = useState<Shipment[]>([]);
@@ -30,6 +30,7 @@ export function useNetworkData() {
   }, []);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     const controller = new AbortController();
     fetchInfrastructure(controller.signal);
     const interval = setInterval(() => fetchInfrastructure(), 60000);
@@ -37,7 +38,7 @@ export function useNetworkData() {
       controller.abort();
       clearInterval(interval);
     };
-  }, [fetchInfrastructure]);
+  }, [fetchInfrastructure, isAuthenticated]);
 
   return { hubs, flights, shipments, isLoading, error, refresh: fetchInfrastructure };
 }

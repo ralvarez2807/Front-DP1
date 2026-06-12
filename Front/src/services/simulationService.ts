@@ -8,7 +8,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
   const currentTimeAt = simStartMs > 0 ? Math.max(0, Math.round((simTimeMs - simStartMs) / 3_600_000)) : 0;
   return {
     id: String(data.id),
-    status: data.status,
+    status: (data.status as string)?.toLowerCase() as SimulationSession['status'],
     startTimeAt: data.simStart || new Date().toISOString(),
     currentTimeAt,
     config,
@@ -23,6 +23,8 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
   };
 }
 
+const SPEED_FACTOR = 480.0;
+
 export const simulationService = {
   createSession: async (
     simStart: string,
@@ -30,7 +32,15 @@ export const simulationService = {
     config: { scenario: SimulationScenario; speed: number },
     signal?: AbortSignal
   ): Promise<SimulationSession> => {
-    const response = await api.post('/simulations', { simStart, simEnd }, { signal });
+    const body = {
+      dataSource:       'DB',
+      solverTimingMode: 'REAL_TIME',
+      optimizerMode:    'ALNS_ONLY',
+      simStart,
+      simEnd,
+      speedFactor:      SPEED_FACTOR,
+    };
+    const response = await api.post('/simulations', body, { signal });
     return mapSession(response.data, config);
   },
 
@@ -41,6 +51,16 @@ export const simulationService = {
   ): Promise<SimulationSession> => {
     const response = await api.get(`/simulations/${id}`, { signal });
     return mapSession(response.data, config);
+  },
+
+  getMine: async (signal?: AbortSignal): Promise<{ id: string; status: string; simTime: string; simStart: string; simEnd: string } | null> => {
+    try {
+      const response = await api.get('/simulations/mine', { signal });
+      return response.data;
+    } catch (e: any) {
+      if (e?.statusCode === 404) return null;
+      throw e;
+    }
   },
 
   pause: async (id: string, signal?: AbortSignal): Promise<void> => {
@@ -54,4 +74,21 @@ export const simulationService = {
   stop: async (id: string, signal?: AbortSignal): Promise<void> => {
     await api.post(`/simulations/${id}/stop`, {}, { signal });
   },
+
+  getSnapshot: async (
+    id: string,
+    config: { scenario: SimulationScenario; speed: number },
+    signal?: AbortSignal
+  ): Promise<SimulationSession> => {
+    const response = await api.get(`/simulations/${id}/snapshot`, { signal });
+    return mapSession(response.data, config);
+  },
+
+  getSnapshotRaw: async (id: string, signal?: AbortSignal): Promise<any> => {
+    const response = await api.get(`/simulations/${id}/snapshot`, { signal });
+    return response.data;
+  },
+
+  mapSessionPublic: (data: any, config: { scenario: SimulationScenario; speed: number }): SimulationSession =>
+    mapSession(data, config),
 };
