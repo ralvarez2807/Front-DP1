@@ -1,0 +1,56 @@
+name: CI/CD Frontend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend-ci:
+    name: Build & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: Front/package-lock.json
+
+      - name: Install dependencies
+        working-directory: Front
+        run: npm ci
+
+      - name: Build
+        working-directory: Front
+        run: npm run build
+
+      - name: Lint
+        working-directory: Front
+        run: npm run lint
+
+  deploy:
+    name: Deploy to Servidor PUCP
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: frontend-ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /home/1inf54.982.6f/front/Front
+            git pull origin main
+            npm ci
+            npm run build
+            sudo systemctl restart frontend
+            echo "✅ Frontend desplegado"
