@@ -1,21 +1,24 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Play, Pause, RotateCcw, Settings2, Database,
-  Activity, Map as MapIcon, Globe,
-  ChevronDown, ChevronUp, AlertTriangle, ZoomIn, ZoomOut,
+  Activity, Map as MapIcon, Globe, Clock, AlertTriangle, CheckCircle, Building2,
+  ChevronDown, ChevronUp, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useSimulationContext } from '../providers/SimulationProvider';
 import { useSocket } from '../providers/SocketProvider';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
+import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
+import { simulationService } from '../services/simulationService';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 
-// ── Velocidad visual fija: 1 día simulado = 15 min reales (96 sim-h / real-h)
-// El backend corre más rápido; aquí controlamos solo la animación visual.
-const VISUAL_SPEED = 96; // sim-horas por hora real
+// speedFactor del backend: 80 sim-horas por hora real (5 días en ~90 min reales).
+// La animación visual usa el mismo factor para que el avión aterrice exactamente
+// cuando el backend envía FLIGHT_ARRIVED.
+const SIM_SPEED = 80;
 
 // ── Panel colapsable flotante ──────────────────────────────────────────────
 function CollapsiblePanel({
@@ -88,10 +91,35 @@ interface ActivePlane {
 
 interface SeenFlight {
   flightId: string;
+  scheduleId: string;   // ID sin sufijo de fecha, p.ej. "SKBO-SEQM-19:00"
   fromIcao: string;
   toIcao: string;
   seenAt: number;
   isActive: boolean;
+  lastOccupied?: number;
+  lastCapacity?: number;
+}
+
+// Extrae el ID de horario sin fecha: "SKBO-SEQM-19:00-20260103" → "SKBO-SEQM-19:00"
+function scheduleIdOf(flightId: string): string {
+  return flightId.replace(/-\d{8}$/, '');
+}
+
+// Inserta una entrada en seenFlights manteniendo:
+// - todos los activos (sin límite)
+// - el vuelo seleccionado (sin límite)
+// - completados limitados a MAX_COMPLETED, sin perder el seleccionado
+function mergeSeenFlights(
+  prev: SeenFlight[],
+  entry: SeenFlight,
+  selectedId: string | null,
+  maxCompleted = 80,
+): SeenFlight[] {
+  const withoutDup = prev.filter(f => f.flightId !== entry.flightId);
+  const next = [entry, ...withoutDup];
+  const active    = next.filter(f => f.isActive || f.flightId === selectedId);
+  const completed = next.filter(f => !f.isActive && f.flightId !== selectedId).slice(0, maxCompleted);
+  return [...active, ...completed];
 }
 
 function getPlaneColor(occupied: number, capacity: number, highlighted: boolean): string {
@@ -156,10 +184,10 @@ function AnimatedPlane({
   const color = getPlaneColor(occupied, capacity, highlighted);
   const size = highlighted ? 1.4 : 1;
 
+  // Escala base reducida a 0.6 para aviones más pequeños
   return (
-    <g transform={`translate(${pos.x},${pos.y}) rotate(${pos.angle}) scale(${iconScale * size})`}>
+    <g transform={`translate(${pos.x},${pos.y}) rotate(${pos.angle}) scale(${iconScale * size * 0.6})`}>
       {highlighted && <circle cx="0" cy="0" r="14" fill="rgba(245,158,11,0.15)" />}
-      {/* Silueta top-down de avión, igual que el ícono de la leyenda */}
       {/* Fuselaje */}
       <ellipse cx="0" cy="0" rx="1.8" ry="7" fill={color} />
       {/* Nariz */}
@@ -177,9 +205,80 @@ function AnimatedPlane({
 
 // ── Vista principal ────────────────────────────────────────────────────────
 export const SimulationDashboardView: React.FC = () => {
-  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights } = useSimulationContext();
+  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
+
+  // ── Carga real de aeropuertos durante la simulación ───────────────────────
+  type SimAirport = { icao: string; city: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string };
+  const [simAirportList, setSimAirportList] = useState<SimAirport[]>([]);
+  const simHubLoads = useMemo(() => {
+    const m = new Map<string, { load: number; capacity: number }>();
+    simAirportList.forEach(a => m.set(a.icao, { load: a.load, capacity: a.capacity }));
+    return m;
+  }, [simAirportList]);
+
+  useEffect(() => {
+    if (!session?.id) { setSimAirportList([]); return; }
+    const sessionId = session.id;
+    let cancelled = false;
+
+    const fetchLoads = async () => {
+      try {
+        const airports = await simulationService.getSimAirports(sessionId);
+        if (cancelled) return;
+        setSimAirportList(airports);
+      } catch { /* silencioso */ }
+    };
+
+    fetchLoads();
+    const id = setInterval(fetchLoads, 8_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [session?.id]);
+
+  // ── Cache de duraciones reales de vuelo (flightId → durationMs real) ──────
+  // Poblado desde el API para que cada vuelo tenga su propia velocidad visual.
+  const flightDurationsRef = useRef<Map<string, number>>(new Map());
+
+  // ── Carga real de vuelos (polling) ──────────────────────────────────────
+  const fetchFlightLoadsRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => {
+    if (!session?.id) { fetchFlightLoadsRef.current = null; return; }
+    const sessionId = session.id;
+    let cancelled = false;
+
+    const fetchFlightLoads = async () => {
+      try {
+        const flights = await simulationService.getSimFlights(sessionId);
+        if (cancelled) return;
+        console.debug('[SimMap] /flights sample:', flights.slice(0, 3).map(f => ({
+          id: f.flightId, status: f.status, load: f.load, cap: f.capacity, dep: f.depTime, arr: f.arrTime,
+        })));
+        // Actualizar cache de duraciones reales
+        flights.forEach(f => {
+          if (f.depTime && f.arrTime) {
+            const simMs = new Date(f.arrTime).getTime() - new Date(f.depTime).getTime();
+            const realMs = Math.max(15_000, Math.round(simMs / SIM_SPEED));
+            flightDurationsRef.current.set(f.flightId, realMs);
+          }
+        });
+        // Actualizar carga en aviones activos
+        setActivePlanes(prev => prev.map(p => {
+          const live = flights.find(f => f.flightId === p.flightId)
+                    ?? flights.find(f => f.fromIcao === p.fromIcao && f.toIcao === p.toIcao && f.status === 'DEPARTED');
+          if (!live || live.capacity === 0) return p;
+          // También actualizar durationMs si ahora tenemos el dato real
+          const cachedDuration = flightDurationsRef.current.get(p.flightId);
+          return { ...p, capacity: live.capacity, occupied: live.load, ...(cachedDuration ? { durationMs: cachedDuration } : {}) };
+        }));
+      } catch { /* silencioso */ }
+    };
+
+    fetchFlightLoadsRef.current = fetchFlightLoads;
+    fetchFlightLoads();
+    const id = setInterval(fetchFlightLoads, 8_000);
+    return () => { cancelled = true; clearInterval(id); fetchFlightLoadsRef.current = null; };
+  }, [session?.id]);
 
   // ── Rutas deduplicadas — clave canónica para que A→B y B→A usen la misma línea
   const uniqueRoutes = useMemo(() => {
@@ -241,7 +340,7 @@ export const SimulationDashboardView: React.FC = () => {
     const rect = svg.getBoundingClientRect();
     const mx = (e.clientX - rect.left) / rect.width * MAP_VIEWBOX.width;
     const my = (e.clientY - rect.top) / rect.height * MAP_VIEWBOX.height;
-    const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const delta = e.deltaY < 0 ? 1.05 : 1 / 1.05;
     setViewTransform(prev => {
       const rawK = prev.k * delta;
       const kRatio = rawK / prev.k;
@@ -288,7 +387,7 @@ export const SimulationDashboardView: React.FC = () => {
     setViewTransform(prev => {
       const cx = MAP_VIEWBOX.width / 2;
       const cy = MAP_VIEWBOX.height / 2;
-      const rawK = prev.k * 1.5;
+      const rawK = prev.k * 1.05;
       const kRatio = rawK / prev.k;
       return clamp(cx - kRatio * (cx - prev.x), cy - kRatio * (cy - prev.y), rawK);
     });
@@ -298,7 +397,7 @@ export const SimulationDashboardView: React.FC = () => {
     setViewTransform(prev => {
       const cx = MAP_VIEWBOX.width / 2;
       const cy = MAP_VIEWBOX.height / 2;
-      const rawK = prev.k / 1.5;
+      const rawK = prev.k / 1.05;
       const kRatio = rawK / prev.k;
       return clamp(cx - kRatio * (cx - prev.x), cy - kRatio * (cy - prev.y), rawK);
     });
@@ -322,47 +421,94 @@ export const SimulationDashboardView: React.FC = () => {
       const fid = payload.flightId ?? payload.id ?? `${fromIcao}-${toIcao}`;
       const key = `${fid}-${fromIcao}-${toIcao}`;
 
-      // Duración visual fija: VISUAL_SPEED = 96 → 1 día sim = 15 min reales.
-      // Independiente de la velocidad real del backend.
-      const flightHours = payload.durationHours ?? payload.flightDurationHours ?? payload.duration ?? 8;
-      const durationMs  = Math.max(30_000, Math.round(flightHours * 3_600_000 / VISUAL_SPEED));
+      // Duración real: usar cache de depTime/arrTime del API si está disponible.
+      // Fallback: 2 sim-horas (90 s reales a speedFactor=80) — se corrige en el
+      // primer polling o cuando llega FLIGHT_ARRIVED.
+      const cachedDuration = flightDurationsRef.current.get(fid);
+      const fallbackSimHours = payload.durationHours ?? payload.duration ?? 2;
+      const durationMs = cachedDuration
+        ?? Math.max(15_000, Math.round(fallbackSimHours * 3_600_000 / SIM_SPEED));
 
-      console.log(`[SimMap] FLIGHT_DEPARTED: ${fromIcao}→${toIcao} | ${flightHours}h sim → ${(durationMs/60000).toFixed(1)} min reales`);
+      console.debug(`[SimMap] FLIGHT_DEPARTED: ${fromIcao}→${toIcao} | cached=${!!cachedDuration} durationMs=${durationMs}`);
 
       const capacity = payload.capacity ?? payload.maxCapacity ?? 0;
-      const occupied = payload.occupiedCapacity ?? payload.currentLoad ?? payload.loadedPackages ?? 0;
+      const occupied = payload.load ?? payload.occupiedCapacity ?? payload.currentLoad ?? payload.loadedPackages ?? 0;
+      console.debug(`[SimMap] FLIGHT_DEPARTED carga WS: load=${payload.load} capacity=${payload.capacity} → occupied=${occupied}`);
+      if (occupied === 0 || capacity === 0) {
+        setTimeout(() => fetchFlightLoadsRef.current?.(), 2_000);
+      }
 
       // Limpiar timer anterior si existe
       const existingTimer = planeTimersRef.current.get(key);
       if (existingTimer) clearTimeout(existingTimer);
 
-      // Registrar timer de limpieza cuando la animación visual termine
+      // Timer de seguridad: elimina el avión si FLIGHT_ARRIVED no llega a tiempo
+      // (se cancela y reemplaza cuando llega el evento de aterrizaje)
       const timer = setTimeout(() => {
         setActivePlanes(prev => prev.filter(p => p.key !== key));
         planeTimersRef.current.delete(key);
-      }, durationMs + 500); // +500ms de margen
+      }, durationMs + 30_000); // margen de 30 s para latencia del WS
       planeTimersRef.current.set(key, timer);
+
+      const schedId = scheduleIdOf(fid);
 
       setActivePlanes(prev => [
         ...prev.filter(p => p.key !== key),
         { key, flightId: fid, fromIcao, toIcao, startedAt: Date.now(), durationMs, capacity, occupied },
       ]);
       setSeenFlights(prev => {
-        const exists = prev.find(f => f.flightId === fid);
-        const entry: SeenFlight = { flightId: fid, fromIcao, toIcao, seenAt: Date.now(), isActive: true };
-        return exists
-          ? prev.map(f => f.flightId === fid ? entry : f)
-          : [entry, ...prev].slice(0, 100);
+        const entry: SeenFlight = { flightId: fid, scheduleId: schedId, fromIcao, toIcao, seenAt: Date.now(), isActive: true };
+        return mergeSeenFlights(prev, entry, selectedFlightId);
+      });
+      // Auto-seguimiento: si el usuario rastreaba una instancia anterior del mismo horario,
+      // actualizar la selección al nuevo vuelo del día
+      setSelectedFlightId(prev => {
+        if (!prev) return prev;
+        const prevSchedule = scheduleIdOf(prev);
+        if (prevSchedule === schedId && prev !== fid) return fid;
+        return prev;
       });
     });
 
-    // FLIGHT_ARRIVED: solo actualiza el estado en seenFlights.
-    // La animación visual termina con su propio timer (VISUAL_SPEED).
+    // FLIGHT_ARRIVED: termina la animación visual y guarda carga final.
+    // Este evento es la fuente de verdad del aterrizaje — reemplaza el timer.
     const unsubArr = socket.on('FLIGHT_ARRIVED', ({ payload }: { payload: any }) => {
       const fid = payload?.flightId ?? payload?.id;
       if (!fid) return;
+      const arrivedLoad = payload?.load ?? payload?.occupiedCapacity ?? undefined;
+
+      // Buscar la key del avión para cancelar su timer de seguridad
+      setActivePlanes(prev => {
+        const plane = prev.find(p => p.flightId === fid);
+        if (plane) {
+          const existingTimer = planeTimersRef.current.get(plane.key);
+          if (existingTimer) clearTimeout(existingTimer);
+          // Dar 1.5 s para que la animación termine visualmente en la posición de destino
+          const landingTimer = setTimeout(() => {
+            setActivePlanes(a => a.filter(p => p.key !== plane.key));
+            planeTimersRef.current.delete(plane.key);
+          }, 1_500);
+          planeTimersRef.current.set(plane.key, landingTimer);
+
+          // Actualizar la carga final en el avión activo también
+          if (arrivedLoad !== undefined) {
+            return prev.map(p => p.flightId === fid ? { ...p, occupied: arrivedLoad } : p);
+          }
+        }
+        return prev;
+      });
+
       setSeenFlights(prev =>
-        prev.map(f => f.flightId === fid ? { ...f, isActive: false } : f)
+        prev.map(f => {
+          if (f.flightId !== fid) return f;
+          const plane = activePlanes.find(p => p.flightId === fid);
+          return {
+            ...f,
+            isActive: false,
+            lastOccupied: arrivedLoad ?? plane?.occupied,
+            lastCapacity: plane?.capacity ?? f.lastCapacity,
+          };
+        })
       );
     });
 
@@ -382,9 +528,9 @@ export const SimulationDashboardView: React.FC = () => {
       const simNow = new Date(f.simTime).getTime();
 
       const simFlightMs  = arrMs - depMs;
-      const durationMs   = Math.max(30_000, Math.round(simFlightMs / VISUAL_SPEED));
+      const durationMs   = Math.max(30_000, Math.round(simFlightMs / SIM_SPEED));
       const simElapsedMs = Math.max(0, simNow - depMs);
-      const startedAt    = Date.now() - Math.round(simElapsedMs / VISUAL_SPEED);
+      const startedAt    = Date.now() - Math.round(simElapsedMs / SIM_SPEED);
 
       const key = `${f.flightId}-${f.fromIcao}-${f.toIcao}`;
 
@@ -409,7 +555,7 @@ export const SimulationDashboardView: React.FC = () => {
         occupied: f.load ?? 0,
       });
 
-      seen.push({ flightId: f.flightId, fromIcao: f.fromIcao, toIcao: f.toIcao, seenAt: Date.now(), isActive: true });
+      seen.push({ flightId: f.flightId, scheduleId: scheduleIdOf(f.flightId), fromIcao: f.fromIcao, toIcao: f.toIcao, seenAt: Date.now(), isActive: true });
     });
 
     setActivePlanes(prev => {
@@ -417,8 +563,13 @@ export const SimulationDashboardView: React.FC = () => {
       return [...prev, ...planes.filter(p => !existingKeys.has(p.key))];
     });
     setSeenFlights(prev => {
-      const existingIds = new Set(prev.map(f => f.flightId));
-      return [...seen.filter(f => !existingIds.has(f.flightId)), ...prev].slice(0, 100);
+      let result = prev;
+      for (const entry of seen) {
+        if (!result.find(f => f.flightId === entry.flightId)) {
+          result = mergeSeenFlights(result, entry, selectedFlightId);
+        }
+      }
+      return result;
     });
 
     clearRestoredFlights();
@@ -439,6 +590,7 @@ export const SimulationDashboardView: React.FC = () => {
   // ── Escenario ────────────────────────────────────────────────────────────
   const [selectedScenario, setSelectedScenario] = useState<SimulationScenario>(SCENARIOS.PERIOD_5D);
   const [startDate, setStartDate] = useState('');
+  const [startTime, setStartTime] = useState('00:00');
   const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [showCollapseWarning, setShowCollapseWarning] = useState(false);
 
@@ -448,7 +600,13 @@ export const SimulationDashboardView: React.FC = () => {
       .then(days => {
         const sorted = [...days].sort();
         setAvailableDays(sorted);
-        if (sorted.length > 0) setStartDate(sorted[0]);
+        if (sorted.length > 0) {
+          const today = new Date().toISOString().slice(0, 10);
+          const best = sorted.includes(today)
+            ? today
+            : sorted.filter(d => d <= today).at(-1) ?? sorted[0];
+          setStartDate(best);
+        }
       })
       .catch(() => {});
     return () => controller.abort();
@@ -459,13 +617,75 @@ export const SimulationDashboardView: React.FC = () => {
       setShowCollapseWarning(true);
       return;
     }
-    await createSession(selectedScenario, startDate);
-  }, [selectedScenario, startDate, createSession]);
+    await createSession(selectedScenario, startDate, startTime);
+  }, [selectedScenario, startDate, startTime, createSession]);
 
   const confirmCollapse = useCallback(async () => {
     setShowCollapseWarning(false);
-    await createSession(SCENARIOS.COLLAPSE, startDate);
-  }, [createSession, startDate]);
+    await createSession(SCENARIOS.COLLAPSE, startDate, startTime);
+  }, [createSession, startDate, startTime]);
+
+  // ── Tiempo real transcurrido (cronómetro fluido) ─────────────────────────
+  const [elapsedRealMs, setElapsedRealMs] = useState(0);
+  useEffect(() => {
+    if (!sessionStartedAt || !session?.id) { setElapsedRealMs(0); return; }
+    // Dependency en session.id solamente para evitar que cada evento WS reinicie el intervalo
+    const startedAt = sessionStartedAt;
+    const id = setInterval(() => setElapsedRealMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [sessionStartedAt, session?.id]);
+
+  const formatRealElapsed = (ms: number) => {
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m.toString().padStart(2,'0')}m ${s.toString().padStart(2,'0')}s`;
+    return `${m}m ${s.toString().padStart(2,'0')}s`;
+  };
+
+  // ── Formato tiempo simulado legible ──────────────────────────────────────
+  const formatSimElapsed = (totalHours: number) => {
+    const d = Math.floor(totalHours / 24);
+    const h = totalHours % 24;
+    if (d > 0) return `${d}d ${h}h`;
+    return `${h}h`;
+  };
+
+  // ── Auto-fit: centra el mapa en los aeropuertos cargados ─────────────────
+  const autoFitDoneRef = useRef(false);
+  useEffect(() => {
+    if (projectedHubs.length === 0 || autoFitDoneRef.current) return;
+    autoFitDoneRef.current = true;
+    const xs = projectedHubs.map(h => h.projectedX!);
+    const ys = projectedHubs.map(h => h.projectedY!);
+    const minX = Math.min(...xs); const maxX = Math.max(...xs);
+    const minY = Math.min(...ys); const maxY = Math.max(...ys);
+    const pad = 80;
+    const kX = MAP_VIEWBOX.width  / (maxX - minX + pad * 2);
+    const kY = MAP_VIEWBOX.height / (maxY - minY + pad * 2);
+    const k  = Math.max(1, Math.min(12, Math.min(kX, kY)));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setViewTransform(clamp(
+      MAP_VIEWBOX.width  / 2 - cx * k,
+      MAP_VIEWBOX.height / 2 - cy * k,
+      k,
+    ));
+  }, [projectedHubs, clamp]);
+
+  // ── Aeropuerto seleccionado ──────────────────────────────────────────────
+  const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
+
+  const focusOnAirport = useCallback((icao: string) => {
+    setSelectedAirportId(prev => prev === icao ? null : icao);
+    const hub = projectedHubs.find(h => h.id === icao);
+    if (!hub) return;
+    const targetK = 5;
+    const W = MAP_VIEWBOX.width;
+    const H = MAP_VIEWBOX.height;
+    setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
+  }, [projectedHubs, clamp]);
 
   // ── Filtro de vuelos ─────────────────────────────────────────────────────
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
@@ -484,18 +704,55 @@ export const SimulationDashboardView: React.FC = () => {
   // Al seleccionar un vuelo, hacer auto-pan/zoom para centrarlo en el mapa
   const focusOnFlight = useCallback((sf: SeenFlight) => {
     setSelectedFlightId(prev => prev === sf.flightId ? null : sf.flightId);
+    setSelectedAirportId(null);
     const origin = projectedHubs.find(h => h.id === sf.fromIcao);
     const dest   = projectedHubs.find(h => h.id === sf.toIcao);
     if (!origin || !dest) return;
     const cx = (origin.projectedX! + dest.projectedX!) / 2;
     const cy = (origin.projectedY! + dest.projectedY!) / 2;
     const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
-    // zoom proporcional a la distancia: ruta corta = más zoom, ruta larga = menos
     const targetK = Math.max(2, Math.min(8, MAP_VIEWBOX.width / (dist * 1.6)));
     const W = MAP_VIEWBOX.width;
     const H = MAP_VIEWBOX.height;
     setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
-  }, [projectedHubs, clamp]);
+  }, [projectedHubs, clamp, setSelectedAirportId]);
+
+  // ── Cámara sigue al avión seleccionado ──────────────────────────────────
+  const followIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (followIntervalRef.current) clearInterval(followIntervalRef.current);
+    if (!selectedFlightId) return;
+
+    const follow = () => {
+      setActivePlanes(planes => {
+        const plane = planes.find(p => p.flightId === selectedFlightId);
+        if (!plane) return planes;
+        const origin = projectedHubs.find(h => h.id === plane.fromIcao);
+        const dest   = projectedHubs.find(h => h.id === plane.toIcao);
+        if (!origin || !dest) return planes;
+        const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+        const px = origin.projectedX! + (dest.projectedX! - origin.projectedX!) * t;
+        const py = origin.projectedY! + (dest.projectedY! - origin.projectedY!) * t;
+        const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+        const targetK = Math.max(3, Math.min(8, MAP_VIEWBOX.width / (dist * 1.2)));
+        const W = MAP_VIEWBOX.width;
+        const H = MAP_VIEWBOX.height;
+        setViewTransform(prev => {
+          const newX = W / 2 - px * targetK;
+          const newY = H / 2 - py * targetK;
+          // suavizado: interpola 15% hacia la posición objetivo
+          const smoothX = prev.x + (newX - prev.x) * 0.15;
+          const smoothY = prev.y + (newY - prev.y) * 0.15;
+          return { x: Math.max(W * (1 - targetK), Math.min(0, smoothX)), y: Math.max(H * (1 - targetK), Math.min(0, smoothY)), k: targetK };
+        });
+        return planes;
+      });
+    };
+
+    followIntervalRef.current = setInterval(follow, 500);
+    return () => { if (followIntervalRef.current) clearInterval(followIntervalRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFlightId, projectedHubs]);
 
   // ── Rutas e hubs con vuelo activo ────────────────────────────────────────
   const hubIndex = useMemo(() => new Map(projectedHubs.map(h => [h.id, h])), [projectedHubs]);
@@ -594,7 +851,7 @@ export const SimulationDashboardView: React.FC = () => {
                     key={flight.id}
                     d={flight.projectedPath}
                     stroke="#f59e0b"
-                    strokeWidth={3 / viewTransform.k}
+                    strokeWidth={1.5 / viewTransform.k}
                     fill="none"
                     opacity={0.95}
                     strokeDasharray={!selectedFlight?.isActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
@@ -607,7 +864,7 @@ export const SimulationDashboardView: React.FC = () => {
                     key={flight.id}
                     d={flight.projectedPath}
                     stroke="#ef4444"
-                    strokeWidth={2 / viewTransform.k}
+                    strokeWidth={1 / viewTransform.k}
                     fill="none"
                     opacity={dimmed ? 0.15 : 0.9}
                   />
@@ -618,7 +875,7 @@ export const SimulationDashboardView: React.FC = () => {
                   key={flight.id}
                   d={flight.projectedPath}
                   stroke="#94a3b8"
-                  strokeWidth={0.6 / viewTransform.k}
+                  strokeWidth={0.4 / viewTransform.k}
                   fill="none"
                   strokeDasharray={`${3 / viewTransform.k} ${5 / viewTransform.k}`}
                   opacity={INACTIVE_OPACITY}
@@ -649,6 +906,11 @@ export const SimulationDashboardView: React.FC = () => {
                     });
                   }}
                   onMouseLeave={() => setPlaneTooltip(null)}
+                  onClick={() => {
+                    const sf = seenFlights.find(f => f.flightId === plane.flightId);
+                    if (sf) focusOnFlight(sf);
+                    else { setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId); setSelectedAirportId(null); }
+                  }}
                 >
                   <AnimatedPlane
                     x1={origin.projectedX!}
@@ -673,21 +935,25 @@ export const SimulationDashboardView: React.FC = () => {
               const x = hub.projectedX!;
               const y = hub.projectedY!;
               const hasActiveFlights = activeHubSet.has(hub.id);
-              const isSelectedHub = selectedFlight
-                ? hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao
-                : false;
-              const isDimmedHub = selectedFlightId && !isSelectedHub;
+              const isSelectedHub = selectedAirportId === hub.id ||
+                (selectedFlight ? hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao : false);
+              const isDimmedHub = (selectedFlightId || selectedAirportId) && !isSelectedHub;
               const r = 5 / viewTransform.k;
               const rInner = 2 / viewTransform.k;
 
-              // Color según estado de almacenamiento (como Dashboard)
-              const pct = hub.storageCapacity > 0
-                ? (hub.currentStorage / hub.storageCapacity) * 100 : 0;
-              const storageColor = isSelectedHub
-                ? '#f59e0b'
-                : pct >= 90 ? '#ef4444'
-                : pct >= 70 ? '#f59e0b'
-                : '#10b981';
+              // Color según estado de almacenamiento — usa datos en tiempo real si disponibles
+              const simLoad = simHubLoads.get(hub.id);
+              const currentStorage = simLoad ? simLoad.load : hub.currentStorage;
+              const storageCapacity = simLoad ? simLoad.capacity : hub.storageCapacity;
+              const pct = storageCapacity > 0 ? (currentStorage / storageCapacity) * 100 : 0;
+              const isAirportSelected = selectedAirportId === hub.id;
+              const storageColor = isAirportSelected
+                ? '#6366f1'
+                : (selectedFlight && (hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao))
+                  ? '#f59e0b'
+                  : pct >= 90 ? '#ef4444'
+                  : pct >= 70 ? '#f59e0b'
+                  : '#10b981';
 
               return (
                 <g
@@ -699,6 +965,7 @@ export const SimulationDashboardView: React.FC = () => {
                     setHubTooltip({ hub, screenX, screenY });
                   }}
                   onMouseLeave={() => setHubTooltip(null)}
+                  onClick={() => { focusOnAirport(hub.id); setSelectedFlightId(null); }}
                 >
                   {/* Zona de hover ampliada (invisible) */}
                   <circle cx={x} cy={y} r={r * 3} fill="transparent" />
@@ -709,7 +976,7 @@ export const SimulationDashboardView: React.FC = () => {
                   )}
                   {isSelectedHub && (
                     <circle cx={x} cy={y} r={r * 3}
-                      fill="none" stroke="#f59e0b"
+                      fill="none" stroke={isAirportSelected ? '#6366f1' : '#f59e0b'}
                       strokeWidth={1.5 / viewTransform.k}
                       strokeDasharray={`${4 / viewTransform.k} ${3 / viewTransform.k}`} />
                   )}
@@ -749,8 +1016,11 @@ export const SimulationDashboardView: React.FC = () => {
         {hubTooltip && (() => {
           const hub = hubTooltip.hub;
           const activeFlights = activePlanes.filter(p => p.fromIcao === hub.id || p.toIcao === hub.id).length;
-          const pct = hub.storageCapacity > 0
-            ? Math.round((hub.currentStorage / hub.storageCapacity) * 100)
+          const simLoadTooltip = simHubLoads.get(hub.id);
+          const tooltipStorage = simLoadTooltip ? simLoadTooltip.load : hub.currentStorage;
+          const tooltipCapacity = simLoadTooltip ? simLoadTooltip.capacity : hub.storageCapacity;
+          const pct = tooltipCapacity > 0
+            ? Math.round((tooltipStorage / tooltipCapacity) * 100)
             : 0;
           const statusColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
           const statusLabel = pct >= 90 ? 'Crítico' : pct >= 70 ? 'En alerta' : 'Óptimo';
@@ -793,7 +1063,7 @@ export const SimulationDashboardView: React.FC = () => {
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] text-slate-500 font-semibold">Almacenamiento</span>
                     <span className="text-[10px] font-black text-slate-800 font-mono">
-                      {hub.currentStorage.toLocaleString()} / {hub.storageCapacity.toLocaleString()}
+                      {tooltipStorage.toLocaleString()} / {tooltipCapacity.toLocaleString()}
                     </span>
                   </div>
                   {/* Barra de progreso */}
@@ -1010,7 +1280,7 @@ export const SimulationDashboardView: React.FC = () => {
               </div>
 
               {selectedScenario === SCENARIOS.PERIOD_5D && (
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 block">
                     Fecha de inicio
                   </label>
@@ -1019,16 +1289,27 @@ export const SimulationDashboardView: React.FC = () => {
                       Cargando fechas disponibles…
                     </div>
                   ) : (
-                    <select
-                      value={startDate}
-                      onChange={e => setStartDate(e.target.value)}
-                      className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
-                    >
-                      {availableDays.map(d => (
-                        <option key={d} value={d}>{d}</option>
-                      ))}
-                    </select>
+                    <AvailableDayPicker
+                      availableDays={availableDays}
+                      selected={startDate}
+                      onChange={setStartDate}
+                      disabled={isLoading}
+                    />
                   )}
+                  {/* Hora de inicio */}
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600">
+                      Hora de inicio (UTC)
+                    </label>
+                  </div>
+                  <input
+                    type="time"
+                    value={startTime}
+                    onChange={e => setStartTime(e.target.value)}
+                    disabled={isLoading}
+                    className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
+                  />
                 </div>
               )}
 
@@ -1055,18 +1336,23 @@ export const SimulationDashboardView: React.FC = () => {
           <CollapsiblePanel
             title={`Simulación — ${session.status.toUpperCase()}`}
             icon={<Activity className="w-4 h-4" />}
-            defaultOpen
+            defaultOpen={false}
           >
             <div className="pt-3 space-y-3">
+              {/* Cartillas de tiempo */}
               <div className="grid grid-cols-2 gap-2 text-center">
-                <div className="bg-slate-50 rounded-xl p-2 border border-slate-100">
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Tiempo sim.</p>
-                  <p className="text-sm font-black font-mono text-indigo-700">T+{session.currentTimeAt || 0}h</p>
+                <div className="bg-indigo-50 rounded-xl p-2 border border-indigo-100">
+                  <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest mb-0.5">Tiempo simulado</p>
+                  <p className="text-sm font-black font-mono text-indigo-700">{formatSimElapsed(session.currentTimeAt || 0)}</p>
                 </div>
-                <div className="bg-slate-50 rounded-xl p-2 border border-slate-100">
-                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Vuelos activos</p>
-                  <p className="text-sm font-black font-mono text-indigo-700">{activePlanes.length}</p>
+                <div className="bg-emerald-50 rounded-xl p-2 border border-emerald-100">
+                  <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-widest mb-0.5">Tiempo real</p>
+                  <p className="text-sm font-black font-mono text-emerald-700">{formatRealElapsed(elapsedRealMs)}</p>
                 </div>
+              </div>
+              <div className="bg-slate-50 rounded-xl p-2 border border-slate-100 text-center">
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Vuelos activos</p>
+                <p className="text-sm font-black font-mono text-indigo-700">{activePlanes.length}</p>
               </div>
               <div className="flex gap-2">
                 <button
@@ -1127,30 +1413,47 @@ export const SimulationDashboardView: React.FC = () => {
                 )}
               </div>
 
-              {/* Vuelo seleccionado actualmente */}
-              {selectedFlightId && selectedFlight && (
-                <div className={cn(
-                  'rounded-xl border p-2.5 flex items-center gap-2',
-                  selectedFlight.isActive
-                    ? 'bg-amber-50 border-amber-200'
-                    : 'bg-slate-50 border-slate-200'
-                )}>
-                  <div className={cn(
-                    'w-2 h-2 rounded-full shrink-0',
-                    selectedFlight.isActive ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
-                  )} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-black text-slate-800 truncate">{selectedFlight.flightId}</p>
-                    <p className="text-[9px] text-slate-500 font-mono">{selectedFlight.fromIcao} → {selectedFlight.toIcao}</p>
+              {/* Vuelo seleccionado — fijo encima del scroll */}
+              {selectedFlightId && selectedFlight && (() => {
+                const ap = activePlanes.find(p => p.flightId === selectedFlight.flightId);
+                // Carga: en vuelo → datos en vivo; aterrizó → last known desde SeenFlight
+                const occ = ap?.occupied ?? selectedFlight.lastOccupied;
+                const cap = ap?.capacity ?? selectedFlight.lastCapacity;
+                const pct = cap && cap > 0 && occ !== undefined ? Math.round((occ / cap) * 100) : null;
+                const lc = pct === null ? '#94a3b8' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+                const borderClass = selectedFlight.isActive ? 'border-amber-300' : 'border-slate-200';
+                const bgClass = selectedFlight.isActive ? 'bg-amber-50' : 'bg-slate-50';
+                return (
+                  <div className={cn('rounded-xl border p-2.5', bgClass, borderClass)}>
+                    <div className="flex items-center gap-2">
+                      <div className={cn('w-2 h-2 rounded-full shrink-0', selectedFlight.isActive ? 'bg-amber-500 animate-pulse' : 'bg-slate-400')} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] font-black text-slate-800 truncate">{selectedFlight.flightId}</p>
+                        <p className="text-[9px] text-slate-500 font-mono">
+                          {selectedFlight.fromIcao} → {selectedFlight.toIcao}
+                          {selectedFlight.scheduleId !== selectedFlight.flightId && (
+                            <span className="ml-1 text-slate-400">· {selectedFlight.scheduleId}</span>
+                          )}
+                        </p>
+                      </div>
+                      <button onClick={() => setSelectedFlightId(null)} className="text-[10px] text-slate-400 hover:text-slate-600 shrink-0 px-1">✕</button>
+                    </div>
+                    {pct !== null && cap! > 0 && (
+                      <div className="mt-2 pt-2 border-t border-slate-100">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-[9px] text-slate-500 font-semibold">
+                            {selectedFlight.isActive ? 'Carga' : 'Carga final'}
+                          </span>
+                          <span className="text-[9px] font-black font-mono" style={{ color: lc }}>{occ}/{cap} ({pct}%)</span>
+                        </div>
+                        <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full" style={{ width: `${Math.min(100, pct)}%`, background: lc }} />
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <button
-                    onClick={() => { setSelectedFlightId(null); }}
-                    className="text-[10px] text-slate-400 hover:text-slate-600 shrink-0 px-1"
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Lista de vuelos */}
               <div className="max-h-44 overflow-y-auto custom-scrollbar space-y-1 pr-0.5">
@@ -1162,6 +1465,13 @@ export const SimulationDashboardView: React.FC = () => {
                   filteredFlights.map(sf => {
                     const isSelected = sf.flightId === selectedFlightId;
                     const activePlane = activePlanes.find(p => p.flightId === sf.flightId);
+                    // Carga a mostrar: en vuelo → datos en vivo; aterrizó → last known
+                    const showOccupied = activePlane?.occupied ?? sf.lastOccupied;
+                    const showCapacity = activePlane?.capacity ?? sf.lastCapacity;
+                    const hasLoad = showCapacity && showCapacity > 0;
+                    const loadColor = hasLoad ? getPlaneColor(showOccupied!, showCapacity!, false) : '#94a3b8';
+                    // Horario sin fecha para mostrar el patrón de ruta
+                    const schedLabel = sf.scheduleId !== sf.flightId ? sf.scheduleId : null;
                     return (
                       <button
                         key={sf.flightId}
@@ -1178,26 +1488,21 @@ export const SimulationDashboardView: React.FC = () => {
                           sf.isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
                         )} />
                         <div className="flex-1 min-w-0">
-                          <p className={cn(
-                            'text-[10px] font-bold truncate',
-                            isSelected ? 'text-amber-700' : 'text-slate-700'
-                          )}>
+                          <p className={cn('text-[10px] font-bold truncate', isSelected ? 'text-amber-700' : 'text-slate-700')}>
                             {sf.flightId}
                           </p>
-                          <p className="text-[9px] text-slate-400 font-mono">{sf.fromIcao} → {sf.toIcao}</p>
-                          {activePlane && activePlane.capacity > 0 && (
-                            <p className="text-[9px] font-mono mt-0.5" style={{
-                              color: getPlaneColor(activePlane.occupied, activePlane.capacity, false)
-                            }}>
-                              Carga: {formatCapacity(activePlane.occupied, activePlane.capacity)}
+                          <p className="text-[9px] text-slate-400 font-mono">{sf.fromIcao} → {sf.toIcao}
+                            {schedLabel && <span className="ml-1 opacity-50">({schedLabel})</span>}
+                          </p>
+                          {hasLoad && (
+                            <p className="text-[9px] font-mono mt-0.5" style={{ color: loadColor }}>
+                              {sf.isActive ? 'Carga' : 'Carga final'}: {formatCapacity(showOccupied!, showCapacity!)}
                             </p>
                           )}
                         </div>
                         <span className={cn(
                           'text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0',
-                          sf.isActive
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : 'bg-slate-100 text-slate-500'
+                          sf.isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
                         )}>
                           {sf.isActive ? 'En vuelo' : 'Aterrizó'}
                         </span>
@@ -1209,32 +1514,90 @@ export const SimulationDashboardView: React.FC = () => {
 
               {seenFlights.length > 0 && (
                 <p className="text-[9px] text-slate-400 text-center">
-                  {seenFlights.filter(f => f.isActive).length} en vuelo · {seenFlights.length} total
+                  {seenFlights.filter(f => f.isActive).length} en vuelo · {seenFlights.filter(f => !f.isActive).length} aterrizados · {seenFlights.length} total
                 </p>
               )}
             </div>
           </CollapsiblePanel>
         )}
 
-        {/* Log de eventos */}
-        {session && events.length > 0 && (
+        {/* Estado de Aeropuertos */}
+        {session && (
           <CollapsiblePanel
-            title={`Eventos (${events.length})`}
-            icon={<Activity className="w-4 h-4" />}
+            title={`Aeropuertos${simAirportList.length > 0 ? ` (${simAirportList.length})` : ''}`}
+            icon={<Building2 className="w-4 h-4" />}
+            defaultOpen={false}
           >
-            <div className="pt-3 space-y-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
-              {events.slice(0, 15).map((evt, i) => (
-                <div key={evt.id || i} className="relative pl-3 border-l-2 border-slate-100">
-                  <div className={cn(
-                    'absolute -left-[5px] top-1.5 w-2 h-2 rounded-full',
-                    evt.severity === 'critical' ? 'bg-red-500'
-                    : evt.severity === 'warning' ? 'bg-amber-500'
-                    : 'bg-indigo-500'
-                  )} />
-                  <p className="text-[10px] text-slate-700 leading-snug">{evt.message}</p>
-                  <p className="text-[9px] text-slate-400 font-mono">T+{evt.timestamp}</p>
+            {/* Aeropuerto seleccionado — fijo encima del scroll */}
+            {(() => {
+              const sel = selectedAirportId ? simAirportList.find(a => a.icao === selectedAirportId) : null;
+              if (!sel) return null;
+              const lc = sel.occupancyLevel === 'RED' ? '#ef4444' : sel.occupancyLevel === 'AMBER' ? '#f59e0b' : '#10b981';
+              return (
+                <div className="mt-3 mb-1 rounded-xl border border-indigo-300 bg-indigo-50 px-2.5 py-2 flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: lc }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] font-black font-mono text-indigo-700">{sel.icao}</span>
+                      <span className="text-[9px] font-bold font-mono" style={{ color: lc }}>{sel.load}/{sel.capacity}</span>
+                    </div>
+                    <div className="w-full h-1 bg-indigo-100 rounded-full overflow-hidden mt-1">
+                      <div className="h-full rounded-full" style={{ width: `${Math.min(100, sel.occupancyPct)}%`, background: lc }} />
+                    </div>
+                    <p className="text-[9px] text-indigo-400 mt-0.5 truncate">{sel.city} · {Math.round(sel.occupancyPct)}%</p>
+                  </div>
+                  <button onClick={() => setSelectedAirportId(null)} className="text-indigo-300 hover:text-indigo-600 shrink-0 px-1 text-xs">✕</button>
                 </div>
-              ))}
+              );
+            })()}
+            <div className="pt-1 space-y-1.5 max-h-52 overflow-y-auto custom-scrollbar pr-1">
+              {simAirportList.length === 0 ? (
+                <p className="text-[10px] text-slate-400 text-center py-4">
+                  {session ? 'Cargando datos de aeropuertos…' : 'Sin sesión activa'}
+                </p>
+              ) : (
+                [...simAirportList]
+                  .sort((a, b) => b.occupancyPct - a.occupancyPct)
+                  .map(airport => {
+                    const isSelected = selectedAirportId === airport.icao;
+                    const levelColor = airport.occupancyLevel === 'RED' ? '#ef4444'
+                      : airport.occupancyLevel === 'AMBER' ? '#f59e0b'
+                      : airport.occupancyLevel === 'GREEN' ? '#10b981'
+                      : '#94a3b8';
+                    return (
+                      <button
+                        key={airport.icao}
+                        onClick={() => { focusOnAirport(airport.icao); setSelectedFlightId(null); }}
+                        className={cn(
+                          'w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left transition-colors',
+                          isSelected
+                            ? 'bg-indigo-50 border border-indigo-300'
+                            : 'hover:bg-slate-50 border border-transparent'
+                        )}
+                      >
+                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: levelColor }} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className={cn('text-[10px] font-black font-mono', isSelected ? 'text-indigo-700' : 'text-slate-800')}>
+                              {airport.icao}
+                            </span>
+                            <span className="text-[9px] font-bold font-mono" style={{ color: levelColor }}>
+                              {airport.load}/{airport.capacity}
+                            </span>
+                          </div>
+                          <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden mt-1">
+                            <div className="h-full rounded-full transition-all duration-700"
+                              style={{ width: `${Math.min(100, airport.occupancyPct)}%`, background: levelColor }} />
+                          </div>
+                          <p className="text-[9px] text-slate-400 mt-0.5 truncate">{airport.city}</p>
+                        </div>
+                        <span className="text-[8px] font-bold font-mono shrink-0" style={{ color: levelColor }}>
+                          {Math.round(airport.occupancyPct)}%
+                        </span>
+                      </button>
+                    );
+                  })
+              )}
             </div>
           </CollapsiblePanel>
         )}
@@ -1267,6 +1630,61 @@ export const SimulationDashboardView: React.FC = () => {
           </div>
         </CollapsiblePanel>
       </div>
+
+      {/* ── MODAL: Simulación completada ─────────────────────────────────────── */}
+      <AnimatePresence>
+        {completionReport && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[200] flex items-center justify-center p-6"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+              className="bg-white rounded-3xl border border-emerald-200 shadow-2xl max-w-md w-full overflow-hidden"
+            >
+              <div className="bg-emerald-600 px-8 py-6 flex items-center gap-4">
+                <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center shrink-0">
+                  <CheckCircle className="w-7 h-7 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-white">Simulación Completada</h3>
+                  <p className="text-emerald-200 text-xs font-semibold">Resumen de operaciones</p>
+                </div>
+              </div>
+              <div className="px-8 py-6 space-y-4">
+                {completionReport.error ? (
+                  <p className="text-sm text-slate-500 text-center py-4">No se pudo obtener el reporte.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {[
+                      { label: 'Bultos entregados', value: completionReport.deliveredBaggage ?? completionReport.deliveredCount ?? completionReport.baggage?.delivered ?? '—' },
+                      { label: 'Total de bultos', value: completionReport.totalBaggage ?? completionReport.totalCount ?? completionReport.baggage?.total ?? '—' },
+                      { label: 'Vuelos completados', value: completionReport.completedFlights ?? completionReport.flights?.completed ?? '—' },
+                      { label: 'Infracciones SLA', value: completionReport.slaBreaches ?? completionReport.slaBreach ?? completionReport.sla?.breaches ?? '—' },
+                    ].map(row => (
+                      <div key={row.label} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
+                        <span className="text-sm text-slate-600 font-semibold">{row.label}</span>
+                        <span className="text-sm font-black text-slate-900 font-mono">{String(row.value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={clearCompletionReport}
+                  className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm transition-colors shadow-lg shadow-emerald-600/20 mt-2"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── MODAL: Advertencia Colapso ───────────────────────────────────────── */}
       <AnimatePresence>

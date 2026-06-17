@@ -23,7 +23,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
   };
 }
 
-const SPEED_FACTOR = 480.0;
+const SPEED_FACTOR = 80.0; // 5 días × 24h / 1.5h real = 80
 
 export const simulationService = {
   createSession: async (
@@ -86,6 +86,29 @@ export const simulationService = {
 
   getSnapshotRaw: async (id: string, signal?: AbortSignal): Promise<any> => {
     const response = await api.get(`/simulations/${id}/snapshot`, { signal });
+    return response.data;
+  },
+
+  getDashboard: async (id: string, signal?: AbortSignal): Promise<{
+    simTime: string; delivered: number; pending: number; assigned: number;
+    inFlight: number; slaBreaches: number; throughputPerHour: number;
+  }> => {
+    const response = await api.get(`/simulations/${id}/dashboard`, { signal });
+    return response.data;
+  },
+
+  getSummaryReport: async (id: string, signal?: AbortSignal): Promise<any> => {
+    const response = await api.get(`/simulations/${id}/reports/summary`, { signal });
+    return response.data;
+  },
+
+  getSimAirports: async (id: string, signal?: AbortSignal): Promise<{ icao: string; city: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string }[]> => {
+    const response = await api.get(`/simulations/${id}/airports`, { signal });
+    return response.data;
+  },
+
+  getSimFlights: async (id: string, signal?: AbortSignal): Promise<{ flightId: string; fromIcao: string; toIcao: string; depTime: string; arrTime: string; status: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string }[]> => {
+    const response = await api.get(`/simulations/${id}/flights`, { signal });
     return response.data;
   },
 

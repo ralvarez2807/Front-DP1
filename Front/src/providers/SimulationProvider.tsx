@@ -37,17 +37,28 @@ function toOperationalEvent(type: BackendEventType, payload: any, simTime?: stri
   };
 }
 
-function computeDateRange(scenario: SimulationScenario, startDate: string): { simStart: string; simEnd: string } {
-  const start = new Date(startDate + 'T00:00:00');
-  const end = new Date(start);
+// Construye rango en UTC puro para evitar offset de timezone del browser.
+// startTime es "HH:MM" en UTC.
+function computeDateRange(
+  scenario: SimulationScenario,
+  startDate: string,
+  startTime: string = '00:00',
+): { simStart: string; simEnd: string } {
+  const start = new Date(`${startDate}T${startTime}:00Z`);
+  const end   = new Date(start);
   if (scenario === SCENARIOS.PERIOD_5D) {
-    end.setDate(end.getDate() + 5);
+    end.setUTCDate(end.getUTCDate() + 5);
   } else if (scenario === SCENARIOS.COLLAPSE) {
-    end.setDate(end.getDate() + 30);
+    end.setUTCDate(end.getUTCDate() + 30);
   } else {
-    end.setDate(end.getDate() + 1);
+    end.setUTCDate(end.getUTCDate() + 1);
   }
   return { simStart: start.toISOString(), simEnd: end.toISOString() };
+}
+
+export interface DashboardMetrics {
+  simTime: string; delivered: number; pending: number; assigned: number;
+  inFlight: number; slaBreaches: number; throughputPerHour: number;
 }
 
 interface SimulationContextType {
@@ -58,7 +69,12 @@ interface SimulationContextType {
   error: string | null;
   restoredFlights: any[];
   clearRestoredFlights: () => void;
-  createSession: (scenario: SimulationScenario, startDate: string) => Promise<void>;
+  sessionStartedAt: number | null;
+  lastSimUpdate: { simMs: number; realMs: number } | null;
+  completionReport: any | null;
+  clearCompletionReport: () => void;
+  dashboardMetrics: DashboardMetrics | null;
+  createSession: (scenario: SimulationScenario, startDate: string, startTime?: string) => Promise<void>;
   startSimulation: () => Promise<void>;
   pauseSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
@@ -76,6 +92,28 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [error, setError] = useState<string | null>(null);
   const [restoredFlights, setRestoredFlights] = useState<any[]>([]);
   const clearRestoredFlights = useCallback(() => setRestoredFlights([]), []);
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+  const [lastSimUpdate, setLastSimUpdate] = useState<{ simMs: number; realMs: number } | null>(null);
+  const [completionReport, setCompletionReport] = useState<any | null>(null);
+  const clearCompletionReport = useCallback(() => setCompletionReport(null), []);
+  const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
+
+  // ── Polling de métricas del dashboard ────────────────────────────────────
+  useEffect(() => {
+    const ACTIVE = new Set(['starting', 'running', 'paused']);
+    if (!session?.id || !ACTIVE.has(session.status)) { setDashboardMetrics(null); return; }
+    const sessionId = session.id;
+    let cancelled = false;
+    const fetch = async () => {
+      try {
+        const data = await simulationService.getDashboard(sessionId);
+        if (!cancelled) setDashboardMetrics(data);
+      } catch { /* silencioso */ }
+    };
+    fetch();
+    const id = setInterval(fetch, 5_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [session?.id, session?.status]);
 
   // ── Rehidratación via GET /simulations/mine ───────────────────────────────
   useEffect(() => {
@@ -108,6 +146,9 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   useEffect(() => {
     const unsubs = BACKEND_EVENTS.map(eventType =>
       socket.on(eventType, ({ simTime, payload }: { simTime?: string; payload: any }) => {
+        if (simTime) {
+          setLastSimUpdate({ simMs: new Date(simTime).getTime(), realMs: Date.now() });
+        }
         setSession(prev => {
           if (!prev || !simTime) return prev;
           const startMs = new Date(prev.startTimeAt).getTime();
@@ -130,11 +171,24 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       const status = payload?.status?.toLowerCase() as SimulationSession['status'];
       if (!status) return;
       if (status === 'stopped' || status === 'completed') {
+        // Capturar el ID antes de limpiar la sesión
+        setSession(prev => {
+          if (prev?.id && status === 'completed') {
+            // Fetch asíncrono del reporte — no bloquea el render
+            simulationService.getSummaryReport(prev.id)
+              .then(report => setCompletionReport(report))
+              .catch(() => setCompletionReport({ error: true }));
+          }
+          return null;
+        });
         socketService.disconnect();
         localStorage.removeItem('simulation_config');
-        setSession(null);
         setEvents([]);
-        addToast(status === 'completed' ? 'Simulación completada' : 'Simulación detenida externamente', 'info');
+        setSessionStartedAt(null);
+        setLastSimUpdate(null);
+        if (status !== 'completed') {
+          addToast('Simulación detenida externamente', 'info');
+        }
         return;
       }
       setSession(prev => prev ? { ...prev, status } : null);
@@ -214,11 +268,11 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.status]);
 
-  const createSession = useCallback(async (scenario: SimulationScenario, startDate: string) => {
+  const createSession = useCallback(async (scenario: SimulationScenario, startDate: string, startTime: string = '00:00') => {
     setIsLoading(true);
     const controller = new AbortController();
     try {
-      const { simStart, simEnd } = computeDateRange(scenario, startDate);
+      const { simStart, simEnd } = computeDateRange(scenario, startDate, startTime);
       const config = { scenario, speed: 1 };
       localStorage.setItem('simulation_config', JSON.stringify(config));
       let newSession: SimulationSession;
@@ -243,6 +297,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setSession(newSession);
       setEvents([]);
       setError(null);
+      setSessionStartedAt(Date.now());
       socketService.connect(newSession.id);
       addToast(`Escenario ${scenario} inicializado correctamente`, 'success');
     } catch (err: any) {
@@ -284,6 +339,8 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       localStorage.removeItem('simulation_config');
       setSession(null);
       setEvents([]);
+      setSessionStartedAt(null);
+      setLastSimUpdate(null);
       addToast('Simulación detenida', 'info');
     } catch {
       addToast('Error al detener', 'error');
@@ -302,12 +359,17 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     error,
     restoredFlights,
     clearRestoredFlights,
+    sessionStartedAt,
+    lastSimUpdate,
+    completionReport,
+    clearCompletionReport,
+    dashboardMetrics,
     createSession,
     startSimulation,
     pauseSimulation,
     resetSimulation,
     injectFault,
-  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
+  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
 
   return (
     <SimulationContext.Provider value={value}>

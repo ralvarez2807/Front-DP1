@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Play, Pause, RotateCcw, Settings2, Database, Zap, Activity } from 'lucide-react';
+import { Play, Pause, RotateCcw, Settings2, Database, Zap, Activity, Clock } from 'lucide-react';
 import { SCENARIOS, SCENARIO_LABELS } from '../constants/domain';
 import { useSimulationContext } from '../providers/SimulationProvider';
+import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
 import { cn } from '../lib/utils';
 import { HUBS } from '../models/infrastructure';
@@ -13,6 +14,7 @@ export const SimulationView: React.FC = () => {
   const [selectedHub, setSelectedHub] = useState(HUBS[0].id);
   const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>('');
+  const [startTime, setStartTime] = useState('00:00');
   const [daysLoading, setDaysLoading] = useState(false);
 
   useEffect(() => {
@@ -22,7 +24,13 @@ export const SimulationView: React.FC = () => {
       .then(days => {
         const sorted = [...days].sort();
         setAvailableDays(sorted);
-        if (sorted.length > 0) setSelectedDate(sorted[0]);
+        if (sorted.length > 0) {
+          const today = new Date().toISOString().slice(0, 10);
+          const best = sorted.includes(today)
+            ? today
+            : sorted.filter(d => d <= today).at(-1) ?? sorted[0];
+          setSelectedDate(best);
+        }
       })
       .catch(() => {})
       .finally(() => setDaysLoading(false));
@@ -31,7 +39,7 @@ export const SimulationView: React.FC = () => {
 
   const handleCreate = async () => {
     if (!selectedDate) return;
-    await createSession(selectedScenario, selectedDate);
+    await createSession(selectedScenario, selectedDate, startTime);
   };
 
   return (
@@ -78,17 +86,27 @@ export const SimulationView: React.FC = () => {
               ) : availableDays.length === 0 ? (
                 <div className="w-full bg-rose-50 border border-rose-200 rounded-2xl px-6 py-4 text-sm text-rose-500 font-bold">Sin fechas disponibles en el servidor</div>
               ) : (
-                <select
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors"
+                <AvailableDayPicker
+                  availableDays={availableDays}
+                  selected={selectedDate}
+                  onChange={setSelectedDate}
                   disabled={isLoading}
-                >
-                  {availableDays.map(day => (
-                    <option key={day} value={day}>{day}</option>
-                  ))}
-                </select>
+                />
               )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Hora de Inicio (UTC)</label>
+              </div>
+              <input
+                type="time"
+                value={startTime}
+                onChange={e => setStartTime(e.target.value)}
+                disabled={isLoading}
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors"
+              />
             </div>
 
             <button
