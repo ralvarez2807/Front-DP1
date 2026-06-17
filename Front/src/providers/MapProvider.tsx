@@ -61,15 +61,41 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .finally(() => setIsLoading(false));
   }, []);
 
-  // ── Cargar aeropuertos y rutas usando los mismos servicios del resto de la app ─
+  // ── Cargar aeropuertos y rutas con reintentos ────────────────────────────
+  // La primera carga puede fallar si el token aún no está listo en el interceptor.
+  // Reintentamos hasta 4 veces con backoff de 800ms.
   useEffect(() => {
-    hubService.getAll()
-      .then(hubs => setFetchedHubs(hubs))
-      .catch(err => console.warn('[MapProvider] airports fetch failed:', err));
+    let cancelled = false;
 
-    flightService.getAll()
-      .then(flights => setFetchedFlights(flights))
-      .catch(err => console.warn('[MapProvider] routes fetch failed:', err));
+    async function fetchWithRetry<T>(
+      fetcher: () => Promise<T>,
+      setter: (v: T) => void,
+      label: string,
+      maxRetries = 6,
+      delay = 600,
+    ) {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (cancelled) return;
+        try {
+          const data = await fetcher();
+          if (!cancelled) setter(data);
+          return;
+        } catch (err: any) {
+          if (cancelled) return;
+          if (attempt < maxRetries) {
+            // Reintento ante cualquier error (auth no lista, red, servidor frío)
+            await new Promise(r => setTimeout(r, delay * (attempt + 1)));
+          } else {
+            console.warn(`[MapProvider] ${label} falló tras ${attempt + 1} intentos:`, err);
+          }
+        }
+      }
+    }
+
+    fetchWithRetry(() => hubService.getAll(),     setFetchedHubs,    'airports');
+    fetchWithRetry(() => flightService.getAll(),  setFetchedFlights, 'routes');
+
+    return () => { cancelled = true; };
   }, []);
 
   // ── Proyectar hubs y rutas ───────────────────────────────────────────────

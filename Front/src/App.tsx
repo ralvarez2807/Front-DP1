@@ -1,7 +1,8 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   Activity, Globe, Settings2, LayoutDashboard,
-  LogOut, Calendar, Search, ChevronRight,
+  LogOut, Calendar, Search, ChevronRight, ChevronDown, ChevronUp,
+  Package, Plane, AlertTriangle, CheckCircle, TrendingUp,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -33,25 +34,45 @@ function formatTime(d: Date) {
 function AppContent() {
   const { user, logout, isAuthenticated, login } = useAuthContext();
   const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
-  const { session } = useSimulationContext();
+  const { session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
+  const SPEED_FACTOR = 80;
 
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [simDashOpen, setSimDashOpen] = useState(false);
+  const simDashRef = useRef<HTMLDivElement>(null);
 
-  // ── Reloj — fecha real (Dashboard = siempre operación diaria) ─────────────
+  // Cierra el panel si se hace clic fuera
+  useEffect(() => {
+    if (!simDashOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (simDashRef.current && !simDashRef.current.contains(e.target as Node)) {
+        setSimDashOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [simDashOpen]);
+
+  // Cierra el panel si la sesión termina
+  useEffect(() => { if (!session) setSimDashOpen(false); }, [session]);
+
+  // ── Reloj — muestra hora simulada cuando hay sesión, real si no ───────────
   const [now, setNow] = useState(new Date());
   useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30_000);
+    const id = setInterval(() => setNow(new Date()), 1_000);
     return () => clearInterval(id);
   }, []);
 
   const displayDate = useMemo(() => {
-    const base = new Date(now);
-    const elapsed = session?.currentTimeAt || 0;
-    return new Date(base.getTime() + elapsed * 3_600_000);
-  }, [now, session?.currentTimeAt]);
+    if (!session?.startTimeAt) return now;
+    if (lastSimUpdate && session.status === 'running') {
+      return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * SPEED_FACTOR);
+    }
+    return new Date(new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000);
+  }, [now, session, lastSimUpdate, SPEED_FACTOR]);
 
   // ── Rutas activas ────────────────────────────────────────────────────────
   const activeRoutes = useMemo(() => {
@@ -124,26 +145,120 @@ function AppContent() {
       {/* ── CONTENT ──────────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
-        {/* HEADER — solo fecha, sin selector de escenario */}
-        <header className="h-16 border-b border-slate-200 bg-white/80 backdrop-blur-md flex items-center justify-between px-8 shrink-0 z-40">
-          <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-xl border border-slate-200">
-            <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
-            <div className="flex flex-col leading-none">
-              <span className="tabular-nums font-black text-slate-900 text-sm tracking-wide">
-                {formatDate(displayDate)}
-              </span>
-              <span className="tabular-nums font-mono text-slate-500 text-xs mt-0.5">
-                {formatTime(displayDate)}
-              </span>
+        {/* HEADER */}
+        <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md shrink-0 z-40">
+          <div className="h-16 flex items-center justify-between px-8">
+            {/* Reloj simulado / real */}
+            <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-xl border border-slate-200">
+              <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
+              <div className="flex flex-col leading-none">
+                <span className="tabular-nums font-black text-slate-900 text-sm tracking-wide">
+                  {formatDate(displayDate)}
+                </span>
+                <span className="tabular-nums font-mono text-slate-500 text-xs mt-0.5">
+                  {formatTime(displayDate)}
+                  {session && <span className="ml-1.5 text-indigo-400 font-bold">(simulado)</span>}
+                </span>
+              </div>
             </div>
-          </div>
 
-          {/* Etiqueta de vista actual */}
-          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-            {activeView === 'dashboard'  && 'Operación Diaria'}
-            {activeView === 'simulation' && 'Simulación'}
-            {activeView === 'monitoring' && 'Monitoreo'}
-            {activeView === 'tracking'   && 'Tracking'}
+            {/* Dashboard de simulación — botón toggle */}
+            {session && (
+              <div className="relative" ref={simDashRef}>
+                <button
+                  onClick={() => setSimDashOpen(v => !v)}
+                  className={cn(
+                    'flex items-center gap-2 px-4 py-2 rounded-xl border font-bold text-sm transition-all',
+                    simDashOpen
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-600/20'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'
+                  )}
+                >
+                  <Activity className="w-4 h-4" />
+                  Dashboard Simulación
+                  {session.status === 'running' && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  )}
+                  {simDashOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+
+                {/* Panel desplegable */}
+                <AnimatePresence>
+                  {simDashOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -8, scaleY: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scaleY: 1 }}
+                      exit={{ opacity: 0, y: -8, scaleY: 0.95 }}
+                      transition={{ duration: 0.15 }}
+                      style={{ transformOrigin: 'top center' }}
+                      className="absolute top-full right-0 mt-2 w-[520px] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden z-50"
+                    >
+                      {/* Cabecera del panel */}
+                      <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                        <div className="flex items-center gap-2">
+                          <div className={cn(
+                            'w-2 h-2 rounded-full',
+                            session.status === 'running' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+                          )} />
+                          <span className="text-xs font-black text-slate-700 uppercase tracking-widest">
+                            Simulación — {session.status.toUpperCase()}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-400">ID: {session.id.slice(0, 12)}…</span>
+                      </div>
+
+                      {/* Métricas */}
+                      {dashboardMetrics ? (
+                        <div className="p-5 grid grid-cols-3 gap-3">
+                          <MetricCard icon={<Package className="w-4 h-4" />} label="Entregadas" value={dashboardMetrics.delivered} color="emerald" />
+                          <MetricCard icon={<Activity className="w-4 h-4" />} label="Pendientes" value={dashboardMetrics.pending} color="amber" />
+                          <MetricCard icon={<Plane className="w-4 h-4" />} label="En vuelo" value={dashboardMetrics.inFlight} color="blue" />
+                          <MetricCard icon={<CheckCircle className="w-4 h-4" />} label="Asignadas" value={dashboardMetrics.assigned} color="indigo" />
+                          <MetricCard icon={<AlertTriangle className="w-4 h-4" />} label="SLA vencidas" value={dashboardMetrics.slaBreaches} color="red" />
+                          <MetricCard icon={<TrendingUp className="w-4 h-4" />} label="Rendim./h" value={dashboardMetrics.throughputPerHour.toFixed(1)} color="violet" />
+                        </div>
+                      ) : (
+                        <div className="p-6 text-center text-sm text-slate-400">
+                          {session.status === 'starting' ? 'Iniciando simulación…' : 'Cargando métricas…'}
+                        </div>
+                      )}
+
+                      {/* Tiempo simulado */}
+                      <div className="px-5 pb-4 pt-1 border-t border-slate-100 flex items-center justify-between">
+                        <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-widest">Tiempo simulado</span>
+                        <span className="text-xs font-black font-mono text-indigo-700">
+                          {session.currentTimeAt
+                            ? `${Math.floor(session.currentTimeAt / 24)}d ${session.currentTimeAt % 24}h`
+                            : '0h'}
+                          {' · '}
+                          {displayDate.toISOString().slice(0, 16).replace('T', ' ')} UTC
+                        </span>
+                      </div>
+
+                      {/* Botón para ir a la simulación */}
+                      {activeView !== 'simulation' && (
+                        <div className="px-5 pb-4">
+                          <button
+                            onClick={() => { setActiveView('simulation'); setSimDashOpen(false); }}
+                            className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
+                          >
+                            Ver mapa de simulación →
+                          </button>
+                        </div>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
+
+            {/* Etiqueta de vista */}
+            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              {activeView === 'dashboard'  && 'Operación Diaria'}
+              {activeView === 'simulation' && 'Simulación'}
+              {activeView === 'monitoring' && 'Monitoreo'}
+              {activeView === 'tracking'   && 'Tracking'}
+            </div>
           </div>
         </header>
 
@@ -152,6 +267,18 @@ function AppContent() {
           'flex-1 relative overflow-hidden',
           !isFullScreen && 'overflow-y-auto p-8 custom-scrollbar'
         )}>
+          {/*
+            SimulationDashboardView se mantiene SIEMPRE montado para que el estado
+            (aviones animados, viewTransform, seenFlights) persista entre pestañas.
+            Solo se oculta/muestra con CSS.
+          */}
+          <div
+            className={cn('absolute inset-0', activeView === 'simulation' ? 'block' : 'hidden')}
+            style={{ zIndex: activeView === 'simulation' ? 1 : 0 }}
+          >
+            <SimulationDashboardView />
+          </div>
+
           <AnimatePresence mode="wait">
             {activeView === 'dashboard' && (
               <DashboardView
@@ -168,11 +295,8 @@ function AppContent() {
                 setMousePos={setMousePos}
               />
             )}
-            {activeView === 'simulation' && (
-              <SimulationDashboardView key="simulation" />
-            )}
-            {activeView === 'monitoring' && <MonitoringView  key="monitoring" />}
-            {activeView === 'tracking'   && <TrackingView    key="tracking"   />}
+            {activeView === 'monitoring' && <MonitoringView key="monitoring" />}
+            {activeView === 'tracking'   && <TrackingView   key="tracking"  />}
           </AnimatePresence>
 
           {/* Tooltip hover (solo en dashboard) */}
@@ -182,13 +306,7 @@ function AppContent() {
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                style={{
-                  position: 'fixed',
-                  left: mousePos.x + 15,
-                  top:  mousePos.y + 15,
-                  zIndex: 1000,
-                  pointerEvents: 'none',
-                }}
+                style={{ position: 'fixed', left: mousePos.x + 15, top: mousePos.y + 15, zIndex: 1000, pointerEvents: 'none' }}
                 className="bg-slate-900 text-white p-3 rounded-xl shadow-2xl border border-slate-700 min-w-[180px]"
               >
                 {hoveredRoute && (
@@ -218,6 +336,59 @@ function AppContent() {
           </AnimatePresence>
         </main>
       </div>
+
+      {/* ── NOTIFICACIÓN GLOBAL: Simulación completada ───────────────────────── */}
+      <AnimatePresence>
+        {completionReport && (
+          <motion.div
+            initial={{ opacity: 0, x: 60 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 60 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+            className="fixed bottom-6 right-6 z-[300] w-80 bg-white rounded-2xl border border-emerald-200 shadow-2xl overflow-hidden"
+          >
+            <div className="bg-emerald-600 px-4 py-3 flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-white shrink-0" />
+              <div className="flex-1">
+                <p className="text-white font-black text-sm">Simulación completada</p>
+                <p className="text-emerald-200 text-[10px]">Los resultados están disponibles</p>
+              </div>
+              <button
+                onClick={clearCompletionReport}
+                className="text-emerald-200 hover:text-white text-lg leading-none shrink-0"
+              >
+                ×
+              </button>
+            </div>
+            {!completionReport.error && (
+              <div className="px-4 py-3 grid grid-cols-2 gap-2 text-[11px]">
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <p className="text-slate-400 font-semibold">Entregadas</p>
+                  <p className="font-black text-slate-900">{completionReport.delivered ?? '—'}</p>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <p className="text-slate-400 font-semibold">SLA vencidas</p>
+                  <p className="font-black text-red-600">{completionReport.slaBreaches ?? '—'}</p>
+                </div>
+              </div>
+            )}
+            <div className="px-4 pb-4 flex gap-2">
+              <button
+                onClick={() => { setActiveView('simulation'); clearCompletionReport(); }}
+                className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors"
+              >
+                Ver simulación →
+              </button>
+              <button
+                onClick={clearCompletionReport}
+                className="px-3 py-2 rounded-xl border border-slate-200 text-slate-500 text-xs font-bold hover:bg-slate-50 transition-colors"
+              >
+                Cerrar
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
@@ -251,5 +422,29 @@ function NavItem({ active, icon, label, onClick }: {
       </span>
       {label}
     </button>
+  );
+}
+
+type MetricColor = 'emerald' | 'amber' | 'blue' | 'indigo' | 'red' | 'violet';
+const COLOR_MAP: Record<MetricColor, string> = {
+  emerald: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+  amber:   'bg-amber-50   text-amber-700   border-amber-100',
+  blue:    'bg-blue-50    text-blue-700    border-blue-100',
+  indigo:  'bg-indigo-50  text-indigo-700  border-indigo-100',
+  red:     'bg-red-50     text-red-700     border-red-100',
+  violet:  'bg-violet-50  text-violet-700  border-violet-100',
+};
+
+function MetricCard({ icon, label, value, color }: {
+  icon: React.ReactNode; label: string; value: number | string; color: MetricColor;
+}) {
+  return (
+    <div className={cn('rounded-xl border px-3 py-2.5 flex items-center gap-2.5', COLOR_MAP[color])}>
+      <span className="shrink-0 opacity-70">{icon}</span>
+      <div>
+        <p className="text-[9px] font-bold uppercase tracking-widest opacity-60">{label}</p>
+        <p className="text-base font-black font-mono leading-tight">{value}</p>
+      </div>
+    </div>
   );
 }
