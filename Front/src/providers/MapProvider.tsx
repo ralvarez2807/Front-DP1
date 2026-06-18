@@ -4,6 +4,7 @@ import * as topojson from 'topojson-client';
 import { Hub, Flight } from '../models/infrastructure';
 import { hubService } from '../services/hubService';
 import { flightService } from '../services/flightService';
+import { useAuthContext } from './AuthProvider';
 
 interface MapContextType {
   worldData: any;
@@ -41,6 +42,7 @@ function arcPath(
 }
 
 export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated, user } = useAuthContext();
   const [worldData,   setWorldData]   = useState<any>(null);
   const [fetchedHubs, setFetchedHubs] = useState<Hub[]>([]);
   const [fetchedFlights, setFetchedFlights] = useState<Flight[]>([]);
@@ -62,9 +64,12 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   // ── Cargar aeropuertos y rutas con reintentos ────────────────────────────
-  // La primera carga puede fallar si el token aún no está listo en el interceptor.
-  // Reintentamos hasta 4 veces con backoff de 800ms.
+  // Solo cuando el usuario está autenticado: estos endpoints requieren JWT, y
+  // dispararlos antes del login (o con un token expirado) producía 401 y, tras
+  // agotar los reintentos, el mapa quedaba sin ciudades para siempre.
+  // Al volver a iniciar sesión (isAuthenticated → true) se reintenta la carga.
   useEffect(() => {
+    if (!isAuthenticated) return;
     let cancelled = false;
 
     async function fetchWithRetry<T>(
@@ -96,7 +101,9 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fetchWithRetry(() => flightService.getAll(),  setFetchedFlights, 'routes');
 
     return () => { cancelled = true; };
-  }, []);
+    // `user` en deps: cada login (token nuevo) reintenta, incluso si isAuthenticated
+    // ya estaba en true con un token previo expirado.
+  }, [isAuthenticated, user]);
 
   // ── Proyectar hubs y rutas ───────────────────────────────────────────────
   const { projectedHubs, projectedFlights } = useMemo(() => {
