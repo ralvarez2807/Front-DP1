@@ -14,7 +14,7 @@ import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
 import { Auth } from './components/Auth';
 
-import { DashboardView }           from './views/DashboardView';
+import { DailyOperationsView }     from './views/DailyOperationsView';
 import { MonitoringView }          from './views/MonitoringView';
 import { SimulationDashboardView } from './views/SimulationDashboardView';
 import { TrackingView }            from './views/TrackingView';
@@ -279,22 +279,20 @@ function AppContent() {
             <SimulationDashboardView />
           </div>
 
+          {/*
+            DailyOperationsView (Operación Día a Día) también se mantiene SIEMPRE
+            montado: su estado vive en OperationsProvider, pero mantenerlo montado
+            preserva además el zoom/pan del mapa. Así, al volver al dashboard, ni el
+            mapa, ni los aeropuertos, ni los vuelos se reinician.
+          */}
+          <div
+            className={cn('absolute inset-0', activeView === 'dashboard' ? 'block' : 'hidden')}
+            style={{ zIndex: activeView === 'dashboard' ? 1 : 0 }}
+          >
+            <DailyOperationsView />
+          </div>
+
           <AnimatePresence mode="wait">
-            {activeView === 'dashboard' && (
-              <DashboardView
-                key="dashboard"
-                hubs={hubs}
-                flights={flights}
-                shipments={shipments}
-                activeRoutes={activeRoutes}
-                day={day}
-                hour={hour}
-                getStorageStatus={getStorageStatus}
-                setHoveredHub={setHoveredHub}
-                setHoveredRoute={setHoveredRoute}
-                setMousePos={setMousePos}
-              />
-            )}
             {activeView === 'monitoring' && <MonitoringView key="monitoring" />}
             {activeView === 'tracking'   && <TrackingView   key="tracking"  />}
           </AnimatePresence>

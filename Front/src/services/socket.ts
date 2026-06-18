@@ -7,7 +7,7 @@ interface SocketMessage {
   payload: any;
 }
 
-class SocketService {
+export class SocketService {
   private socket: WebSocket | null = null;
   private listeners: Map<string, Set<SocketCallback>> = new Map();
   private reconnectAttempts = 0;
@@ -56,6 +56,7 @@ class SocketService {
       this.socket.onopen = () => {
         console.log('[Socket] Connected');
         this.reconnectAttempts = 0;
+        this.emit('__OPEN__', {});
       };
 
       this.socket.onmessage = (event) => {
@@ -83,6 +84,7 @@ class SocketService {
       this.socket.onclose = () => {
         console.warn('[Socket] Disconnected');
         this.socket = null;
+        this.emit('__CLOSE__', {});
         if (!this.intentionalDisconnect) {
           this._attemptReconnect(sessionId);
         }
