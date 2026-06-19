@@ -89,3 +89,15 @@ Se limpia al detener la simulación.
 ## Datos de red
 
 `useNetworkData(isAuthenticated)` — recibe el flag de auth para no hacer fetch antes de que el usuario esté logueado. Se llama en `AppContent` pasando `isAuthenticated` del contexto.
+
+`MapProvider` (aeropuertos + rutas, proyección d3) debe estar **dentro** de `AuthProvider` y carga `/data/airports` y `/data/routes` con dependencia `[isAuthenticated, user]`. Antes estaba por fuera y disparaba los fetch sin token → 401 → tras agotar reintentos el mapa quedaba **sin ciudades para siempre**. Ahora reintenta en cada login.
+
+## Operación Día a Día
+
+Vista en vivo (pestaña "Dashboard") anclada a la fecha real de hoy, que refleja los planes de vuelo. Consume la sesión permanente del backend:
+
+- `services/operationsService.ts` — `GET /operations` → `{ id, speedFactor, ... }`; luego reutiliza `/simulations/:id/snapshot` y `/dashboard`. Expone `operationsSocket`, una instancia **separada** de `SocketService` (no el `socketService` global de la simulación manual) para que ambos streams coexistan.
+- `providers/OperationsProvider.tsx` — montado a nivel raíz, **nunca se desmonta**: ahí viven los aviones animados, la carga de aeropuertos y las métricas, de modo que persisten al cambiar de pestaña. Suscribe `FLIGHT_DEPARTED/ARRIVED/CANCELLED` por WS, restaura vuelos en aire (status `DEPARTED` del snapshot) y re-sincroniza cada 10 s.
+- `views/DailyOperationsView.tsx` — mapa en vivo reusando las proyecciones de `MapProvider` + `components/map/AnimatedPlane`. Va **siempre montado** y oculto por CSS en `App.tsx` (como `SimulationDashboardView`) para preservar también el zoom/pan.
+
+Duración de animación = `(arrTime − depTime) / speedFactor`; con `speedFactor = 1` los aviones se mueven a tiempo real.
