@@ -18,6 +18,24 @@ export interface OperationsStatus {
  */
 export const operationsSocket = new SocketService();
 
+/** Orden de maletas que carga un operario en la Operación Día a Día. */
+export interface CreateOrderRequest {
+  originIcao: string;
+  destIcao: string;
+  quantity: number;
+  clientId?: string;
+}
+
+/** Respuesta tras registrar una orden manual (POST /operations/orders). */
+export interface CreateOrderResponse {
+  shipmentId: string;
+  baggageIds: string[];
+  originIcao: string;
+  destIcao: string;
+  quantity: number;
+  entryTime: string;
+}
+
 export const operationsService = {
   /** Devuelve (creando si hace falta) la sesión día-a-día permanente del servidor. */
   getStatus: async (signal?: AbortSignal): Promise<OperationsStatus> => {
@@ -38,5 +56,14 @@ export const operationsService = {
   }> => {
     const response = await api.get(`/simulations/${id}/dashboard`, { signal });
     return response.data;
+  },
+
+  /**
+   * Registra una orden de maletas en la Operación Día a Día. La hora de la orden es
+   * el momento de envío y el backend la enruta de inmediato a vuelos con capacidad.
+   */
+  createOrder: async (order: CreateOrderRequest): Promise<CreateOrderResponse> => {
+    const response = await api.post('/operations/orders', order);
+    return response.data as CreateOrderResponse;
   },
 };

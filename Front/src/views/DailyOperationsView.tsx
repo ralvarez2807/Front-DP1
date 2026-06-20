@@ -9,6 +9,12 @@ import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider'
 import { AnimatedPlane } from '../components/map/AnimatedPlane';
 import { cn } from '../lib/utils';
 
+// Países sin operación que podrían caer dentro del recuadro de la región y se ocultan
+// para que el mapa solo muestre la zona de vuelos (ISO 3166-1 numérico, como en
+// world-atlas): EE.UU. 840, Canadá 124, Rusia 643, Australia 36, Antártida 10,
+// Groenlandia 304, Nueva Zelanda 554.
+const HIDDEN_COUNTRY_IDS = new Set([840, 124, 643, 36, 10, 304, 554]);
+
 // ── Reloj ──────────────────────────────────────────────────────────────────
 const MONTHS_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
 function fmtDate(d: Date) {
@@ -118,6 +124,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   }, [clamp]);
 
   const handleMouseUp = useCallback(() => { isPanning.current = false; }, []);
+  // La proyección ya viene encuadrada en la región (MapProvider.fitExtent), así que
+  // restablecer = vista completa del lienzo (= región), sin zonas sin vuelos.
   const resetZoom = useCallback(() => setViewTransform({ x: 0, y: 0, k: 1 }), []);
   const zoomBy = useCallback((factor: number) => {
     setViewTransform(prev => {
@@ -208,7 +216,9 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
           {worldData && pathGenerator && (
             <g className="countries">
-              {worldData.features.map((feature: any, i: number) => (
+              {worldData.features
+                .filter((feature: any) => !HIDDEN_COUNTRY_IDS.has(Number(feature.id)))
+                .map((feature: any, i: number) => (
                 <path
                   key={i}
                   d={pathGenerator(feature) || ''}

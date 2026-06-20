@@ -21,10 +21,33 @@ const MapContext = createContext<MapContextType | null>(null);
 const MAP_WIDTH  = 1200;
 const MAP_HEIGHT = 800;
 
-function buildProjection() {
-  return d3.geoMercator()
-    .scale(185)
-    .translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
+// Margen (en unidades del viewBox) alrededor de los aeropuertos extremos.
+const FIT_PADDING = 60;
+
+/**
+ * Proyección Mercator encuadrada en la región operativa.
+ *
+ * Si hay aeropuertos cargados, `fitExtent` escala y centra el mapa para que el
+ * lienzo (MAP_WIDTH×MAP_HEIGHT) contenga EXACTAMENTE el bounding box de los
+ * aeropuertos (= los extremos de los vuelos). Así, zonas sin operación (EE.UU.,
+ * Rusia, Australia…) quedan fuera del lienzo: no se ven ni se puede arrastrar
+ * hasta ellas. Sin aeropuertos aún, cae a una vista mundial mientras carga.
+ */
+function buildProjection(hubs: Hub[]) {
+  const projection = d3.geoMercator();
+  if (hubs.length >= 2) {
+    const points = {
+      type: 'MultiPoint' as const,
+      coordinates: hubs.map(h => [h.lng, h.lat]),
+    };
+    projection.fitExtent(
+      [[FIT_PADDING, FIT_PADDING], [MAP_WIDTH - FIT_PADDING, MAP_HEIGHT - FIT_PADDING]],
+      points as any,
+    );
+  } else {
+    projection.scale(185).translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
+  }
+  return projection;
 }
 
 // Bezier cuadrático — control point simétrico para que A→B y B→A
@@ -48,8 +71,10 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [fetchedFlights, setFetchedFlights] = useState<Flight[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // ── Proyección fija ──────────────────────────────────────────────────────
-  const projection = useMemo(buildProjection, []);
+  // ── Proyección encuadrada en la región operativa ─────────────────────────
+  // Depende de los aeropuertos: al cargarlos, el mapa se re-encuadra en su
+  // bounding box (ignora continentes sin vuelos).
+  const projection = useMemo(() => buildProjection(fetchedHubs), [fetchedHubs]);
   const pathGenerator = useMemo(() => d3.geoPath().projection(projection), [projection]);
 
   // ── Cargar mapa mundial ──────────────────────────────────────────────────
