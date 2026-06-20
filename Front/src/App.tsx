@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   Activity, Globe, Settings2, LayoutDashboard,
   LogOut, Calendar, Search, ChevronRight, ChevronDown, ChevronUp,
-  Package, Plane, AlertTriangle, CheckCircle, TrendingUp, PackagePlus,
+  Package, Plane, AlertTriangle, CheckCircle, TrendingUp, PackagePlus, Warehouse,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -14,13 +14,14 @@ import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
 import { Auth } from './components/Auth';
 
+import { AirportManagerView }      from './views/AirportManagerView';
 import { DailyOperationsView }     from './views/DailyOperationsView';
 import { MonitoringView }          from './views/MonitoringView';
 import { OrderUploadView }         from './views/OrderUploadView';
 import { SimulationDashboardView } from './views/SimulationDashboardView';
 import { TrackingView }            from './views/TrackingView';
 
-type View = 'dashboard' | 'orders' | 'monitoring' | 'simulation' | 'tracking';
+type View = 'dashboard' | 'orders' | 'airports' | 'monitoring' | 'simulation' | 'tracking';
 
 // ── Formateadores de fecha ──────────────────────────────────────────────────
 const MONTHS_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
@@ -116,6 +117,7 @@ function AppContent() {
         <nav className="flex-1 px-4 py-6 space-y-2">
           <NavItem active={activeView==='dashboard'}  icon={<LayoutDashboard />} label="Dashboard"  onClick={() => setActiveView('dashboard')} />
           <NavItem active={activeView==='orders'}     icon={<PackagePlus />}     label="Órdenes"    onClick={() => setActiveView('orders')} />
+          <NavItem active={activeView==='airports'}   icon={<Warehouse />}       label="Aeropuertos" onClick={() => setActiveView('airports')} />
           <NavItem active={activeView==='monitoring'} icon={<Activity />}        label="Monitoreo"  onClick={() => setActiveView('monitoring')} />
           <NavItem active={activeView==='simulation'} icon={<Settings2 />}       label="Simulación" onClick={() => setActiveView('simulation')} />
           <NavItem active={activeView==='tracking'}   icon={<Search />}          label="Tracking"   onClick={() => setActiveView('tracking')} />
@@ -258,6 +260,7 @@ function AppContent() {
             <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
               {activeView === 'dashboard'  && 'Operación Diaria'}
               {activeView === 'orders'     && 'Carga de Órdenes'}
+              {activeView === 'airports'   && 'Gestor de Aeropuertos'}
               {activeView === 'simulation' && 'Simulación'}
               {activeView === 'monitoring' && 'Monitoreo'}
               {activeView === 'tracking'   && 'Tracking'}
@@ -296,9 +299,10 @@ function AppContent() {
           </div>
 
           <AnimatePresence mode="wait">
-            {activeView === 'orders'     && <OrderUploadView key="orders"     />}
-            {activeView === 'monitoring' && <MonitoringView  key="monitoring" />}
-            {activeView === 'tracking'   && <TrackingView    key="tracking"   />}
+            {activeView === 'orders'     && <OrderUploadView   key="orders"     />}
+            {activeView === 'airports'   && <AirportManagerView key="airports"  />}
+            {activeView === 'monitoring' && <MonitoringView    key="monitoring" />}
+            {activeView === 'tracking'   && <TrackingView      key="tracking"   />}
           </AnimatePresence>
 
           {/* Tooltip hover (solo en dashboard) */}

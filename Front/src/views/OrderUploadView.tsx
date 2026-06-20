@@ -2,12 +2,17 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   PackagePlus, Send, ArrowRight, CheckCircle2, AlertTriangle,
-  Loader2, MapPin, Boxes, Clock, Info,
+  Loader2, MapPin, Boxes, Clock, Info, Warehouse,
 } from 'lucide-react';
 import { Hub } from '../models/infrastructure';
 import { hubService } from '../services/hubService';
 import { operationsService, CreateOrderResponse } from '../services/operationsService';
+import { useAuthContext } from '../providers/AuthProvider';
 import { cn } from '../lib/utils';
+
+// Normaliza nombres de ciudad para comparar username↔ciudad: sin acentos ni mayúsculas.
+const normalizeCity = (s: string) =>
+  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').trim().toLowerCase();
 
 // ── Reloj ──────────────────────────────────────────────────────────────────
 const MONTHS_ES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -33,6 +38,19 @@ export const OrderUploadView: React.FC = () => {
     [hubs],
   );
 
+  // ── Sede del operario ───────────────────────────────────────────────────────
+  // Cada usuario es el operador de su ciudad: si el username del usuario logueado
+  // coincide con el nombre de una ciudad de la red, esa es su sede de origen (fija).
+  // Si no (p. ej. el usuario admin), el operario elige el origen libremente.
+  const { user } = useAuthContext();
+  const operatorAirport = useMemo(() => {
+    if (!user?.name) return null;
+    const uname = normalizeCity(user.name);
+    if (!uname) return null;
+    return hubs.find(h => normalizeCity(h.city) === uname) ?? null;
+  }, [hubs, user]);
+  const originLocked = !!operatorAirport;
+
   // ── Estado del formulario ───────────────────────────────────────────────────
   const [origin, setOrigin]     = useState('');
   const [dest, setDest]         = useState('');
@@ -41,6 +59,14 @@ export const OrderUploadView: React.FC = () => {
   const [error, setError]   = useState<string | null>(null);
   const [success, setSuccess] = useState<CreateOrderResponse | null>(null);
   const [recent, setRecent] = useState<CreateOrderResponse[]>([]);
+
+  // Con sede fija, el origen queda atado a la ciudad del operario.
+  useEffect(() => {
+    if (operatorAirport) {
+      setOrigin(operatorAirport.id);
+      setDest(d => (d === operatorAirport.id ? '' : d));
+    }
+  }, [operatorAirport]);
 
   const sameAirport = origin !== '' && origin === dest;
   const canSubmit = origin !== '' && dest !== '' && !sameAirport && quantity > 0 && !submitting;
@@ -113,16 +139,30 @@ export const OrderUploadView: React.FC = () => {
             <label className="text-[11px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
               <MapPin className="w-3.5 h-3.5 text-blue-600" /> Aeropuerto de origen
             </label>
-            <select
-              value={origin}
-              onChange={e => setOrigin(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors"
-            >
-              <option value="">Selecciona origen…</option>
-              {airports.map(h => (
-                <option key={h.id} value={h.id}>{h.city} ({h.id})</option>
-              ))}
-            </select>
+            {originLocked && operatorAirport ? (
+              <div className="w-full px-4 py-3 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-2.5">
+                <Warehouse className="w-4 h-4 text-blue-600 shrink-0" />
+                <div className="leading-tight">
+                  <span className="text-sm font-black text-slate-900">
+                    {operatorAirport.city} ({operatorAirport.id})
+                  </span>
+                  <span className="block text-[10px] font-bold text-blue-600/80 uppercase tracking-wider">
+                    Tu sede · origen fijo
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <select
+                value={origin}
+                onChange={e => setOrigin(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors"
+              >
+                <option value="">Selecciona origen…</option>
+                {airports.map(h => (
+                  <option key={h.id} value={h.id}>{h.city} ({h.id})</option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Destino */}
