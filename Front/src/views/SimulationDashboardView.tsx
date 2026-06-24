@@ -1,8 +1,8 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Play, Pause, RotateCcw, Settings2, Database,
-  Activity, Map as MapIcon, Globe, Clock, AlertTriangle, CheckCircle, Building2,
-  ChevronDown, ChevronUp, ZoomIn, ZoomOut,
+  Map as MapIcon, Clock, AlertTriangle, CheckCircle,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -11,7 +11,8 @@ import { useSocket } from '../providers/SocketProvider';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
-import { simulationService } from '../services/simulationService';
+import { simulationService, SimAirport, SimFlight, SimShipment } from '../services/simulationService';
+import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 
@@ -19,47 +20,6 @@ import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/dom
 // La animación visual usa el mismo factor para que el avión aterrice exactamente
 // cuando el backend envía FLIGHT_ARRIVED.
 const SIM_SPEED = 80;
-
-// ── Panel colapsable flotante ──────────────────────────────────────────────
-function CollapsiblePanel({
-  title, icon, defaultOpen = false, children, className,
-}: {
-  title: string; icon: React.ReactNode; defaultOpen?: boolean;
-  children: React.ReactNode; className?: string;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className={cn(
-      'bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xl overflow-hidden min-w-[220px] max-w-[310px]',
-      className
-    )}>
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-blue-600">{icon}</span>
-          <span className="text-[11px] font-black uppercase tracking-widest text-slate-700">{title}</span>
-        </div>
-        {open ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-               : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="px-4 pb-4 border-t border-slate-100">{children}</div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
@@ -70,11 +30,16 @@ function LegendRow({ dot, label }: { dot: string; label: string }) {
   );
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-function formatCapacity(occupied: number, capacity: number): string {
-  if (capacity === 0) return '—';
-  const pct = Math.round((occupied / capacity) * 100);
-  return `${occupied}/${capacity} (${pct}%)`;
+// ── Métrica compacta para la barra inferior ─────────────────────────────────
+function BottomStat({ label, value, className }: {
+  label: string; value: React.ReactNode; className?: string;
+}) {
+  return (
+    <div className="flex flex-col leading-tight px-1.5">
+      <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
+      <span className={cn('text-base font-black font-mono', className)}>{value}</span>
+    </div>
+  );
 }
 
 // ── Tipos para aviones en vuelo ────────────────────────────────────────────
@@ -205,13 +170,19 @@ function AnimatedPlane({
 
 // ── Vista principal ────────────────────────────────────────────────────────
 export const SimulationDashboardView: React.FC = () => {
-  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport } = useSimulationContext();
+  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
 
   // ── Carga real de aeropuertos durante la simulación ───────────────────────
-  type SimAirport = { icao: string; city: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string };
   const [simAirportList, setSimAirportList] = useState<SimAirport[]>([]);
+  // Listas en vivo para el panel de información (vuelos y paquetes/envíos)
+  const [simFlightList, setSimFlightList] = useState<SimFlight[]>([]);
+  const [simShipmentList, setSimShipmentList] = useState<SimShipment[]>([]);
+  // Panel lateral derecho abierto/colapsado
+  const [infoPanelOpen, setInfoPanelOpen] = useState(true);
+  // Popover abierto en la barra inferior (control/leyenda/config)
+  const [bottomPopover, setBottomPopover] = useState<'legend' | 'config' | null>(null);
   const simHubLoads = useMemo(() => {
     const m = new Map<string, { load: number; capacity: number }>();
     simAirportList.forEach(a => m.set(a.icao, { load: a.load, capacity: a.capacity }));
@@ -236,6 +207,25 @@ export const SimulationDashboardView: React.FC = () => {
     return () => { cancelled = true; clearInterval(id); };
   }, [session?.id]);
 
+  // ── Carga real de envíos/paquetes durante la simulación ───────────────────
+  useEffect(() => {
+    if (!session?.id) { setSimShipmentList([]); return; }
+    const sessionId = session.id;
+    let cancelled = false;
+
+    const fetchShipments = async () => {
+      try {
+        const shipments = await simulationService.getSimShipments(sessionId);
+        if (cancelled) return;
+        setSimShipmentList(shipments);
+      } catch { /* silencioso */ }
+    };
+
+    fetchShipments();
+    const id = setInterval(fetchShipments, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [session?.id]);
+
   // ── Cache de duraciones reales de vuelo (flightId → durationMs real) ──────
   // Poblado desde el API para que cada vuelo tenga su propia velocidad visual.
   const flightDurationsRef = useRef<Map<string, number>>(new Map());
@@ -243,7 +233,7 @@ export const SimulationDashboardView: React.FC = () => {
   // ── Carga real de vuelos (polling) ──────────────────────────────────────
   const fetchFlightLoadsRef = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
-    if (!session?.id) { fetchFlightLoadsRef.current = null; return; }
+    if (!session?.id) { fetchFlightLoadsRef.current = null; setSimFlightList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
 
@@ -251,6 +241,7 @@ export const SimulationDashboardView: React.FC = () => {
       try {
         const flights = await simulationService.getSimFlights(sessionId);
         if (cancelled) return;
+        setSimFlightList(flights);
         console.debug('[SimMap] /flights sample:', flights.slice(0, 3).map(f => ({
           id: f.flightId, status: f.status, load: f.load, cap: f.capacity, dep: f.depTime, arr: f.arrTime,
         })));
@@ -352,6 +343,7 @@ export const SimulationDashboardView: React.FC = () => {
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    setBottomPopover(null);
     isPanning.current = true;
     panStart.current = {
       x: e.clientX,
@@ -581,7 +573,6 @@ export const SimulationDashboardView: React.FC = () => {
       setActivePlanes([]);
       setSeenFlights([]);
       setSelectedFlightId(null);
-      setFlightQuery('');
       planeTimersRef.current.forEach(t => clearTimeout(t));
       planeTimersRef.current.clear();
     }
@@ -687,19 +678,8 @@ export const SimulationDashboardView: React.FC = () => {
     setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
   }, [projectedHubs, clamp]);
 
-  // ── Filtro de vuelos ─────────────────────────────────────────────────────
+  // ── Vuelo seleccionado en el mapa ────────────────────────────────────────
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
-  const [flightQuery, setFlightQuery] = useState('');
-
-  const filteredFlights = useMemo(() => {
-    const q = flightQuery.trim().toUpperCase();
-    if (!q) return seenFlights;
-    return seenFlights.filter(f =>
-      f.flightId.toUpperCase().includes(q) ||
-      f.fromIcao.includes(q) ||
-      f.toIcao.includes(q)
-    );
-  }, [seenFlights, flightQuery]);
 
   // Al seleccionar un vuelo, hacer auto-pan/zoom para centrarlo en el mapa
   const focusOnFlight = useCallback((sf: SeenFlight) => {
@@ -716,6 +696,28 @@ export const SimulationDashboardView: React.FC = () => {
     const H = MAP_VIEWBOX.height;
     setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
   }, [projectedHubs, clamp, setSelectedAirportId]);
+
+  // Enfocar un vuelo desde el panel de información (datos del API), centrando la cámara
+  const focusOnSimFlight = useCallback((f: SimFlight) => {
+    setSelectedAirportId(null);
+    setSelectedFlightId(prev => prev === f.flightId ? null : f.flightId);
+    const origin = projectedHubs.find(h => h.id === f.fromIcao);
+    const dest   = projectedHubs.find(h => h.id === f.toIcao);
+    if (!origin || !dest) return;
+    const cx = (origin.projectedX! + dest.projectedX!) / 2;
+    const cy = (origin.projectedY! + dest.projectedY!) / 2;
+    const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+    const targetK = Math.max(2, Math.min(8, MAP_VIEWBOX.width / (dist * 1.6)));
+    const W = MAP_VIEWBOX.width;
+    const H = MAP_VIEWBOX.height;
+    setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
+  }, [projectedHubs, clamp]);
+
+  // Enfocar un aeropuerto desde el panel y deseleccionar vuelo
+  const handleSelectAirportFromPanel = useCallback((icao: string) => {
+    focusOnAirport(icao);
+    setSelectedFlightId(null);
+  }, [focusOnAirport]);
 
   // ── Cámara sigue al avión seleccionado ──────────────────────────────────
   const followIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1169,19 +1171,8 @@ export const SimulationDashboardView: React.FC = () => {
         })()}
       </AnimatePresence>
 
-      {/* ── BADGE LIVE ──────────────────────────────────────────────────────── */}
-      <div className="absolute top-5 left-5 z-20 flex items-center gap-2 bg-white/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-200 shadow-xl">
-        <MapIcon className="w-4 h-4 text-indigo-600" />
-        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-900">
-          Simulación Operacional
-        </span>
-        {simRunning && (
-          <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse ml-1" />
-        )}
-      </div>
-
-      {/* ── CONTROLES DE ZOOM (abajo izquierda sobre el mapa) ───────────────── */}
-      <div className="absolute bottom-5 left-5 z-20 flex flex-col gap-1.5">
+      {/* ── CONTROLES DE ZOOM (arriba a la izquierda) ──────────────────────── */}
+      <div className="absolute top-4 left-4 z-20 flex flex-col gap-1.5">
         <button
           onClick={zoomIn}
           className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700"
@@ -1203,163 +1194,188 @@ export const SimulationDashboardView: React.FC = () => {
         >
           ⌂
         </button>
-        {/* Sesión activa (movida aquí) */}
-        {session && (
-          <div className="mt-2 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg px-3 py-2 flex items-center gap-2">
-            <Globe className="w-4 h-4 text-indigo-600 shrink-0" />
-            <div>
-              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Sesión</p>
-              <p className="text-[10px] font-black text-slate-700 font-mono">
-                {session.id.substring(0, 12)}…
-              </p>
-            </div>
-            <div className={cn(
-              'w-2 h-2 rounded-full shrink-0',
-              simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
-            )} />
-          </div>
-        )}
       </div>
 
-      {/* ── PANELES DERECHA ─────────────────────────────────────────────────── */}
-      <div className="absolute top-5 right-5 z-20 flex flex-col gap-3">
-
-        {/* Configuración / Escenario */}
-        {!session && (
-          <CollapsiblePanel
-            title="Configurar Simulación"
-            icon={<Settings2 className="w-4 h-4" />}
-            defaultOpen={false}
-            className="max-w-[320px]"
-          >
-            <div className="pt-3 space-y-4">
-              <div className="space-y-2">
-                {([SCENARIOS.PERIOD_5D, SCENARIOS.COLLAPSE] as SimulationScenario[]).map(s => (
-                  <label
-                    key={s}
-                    className={cn(
-                      'flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors',
-                      selectedScenario === s
-                        ? s === SCENARIOS.COLLAPSE
-                          ? 'border-rose-300 bg-rose-50'
-                          : 'border-indigo-300 bg-indigo-50'
-                        : 'border-slate-200 bg-white hover:bg-slate-50'
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="scenario"
-                      value={s}
-                      checked={selectedScenario === s}
-                      onChange={() => setSelectedScenario(s)}
-                      className="mt-0.5 accent-indigo-600"
-                    />
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className={cn(
-                          'text-[11px] font-black',
-                          selectedScenario === s
-                            ? s === SCENARIOS.COLLAPSE ? 'text-rose-700' : 'text-indigo-700'
-                            : 'text-slate-700'
-                        )}>
-                          {SCENARIO_LABELS[s]}
-                        </span>
-                        {s === SCENARIOS.COLLAPSE && (
-                          <span className="text-[8px] font-bold uppercase tracking-widest bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded-full">
-                            Stress test
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
-                        {s === SCENARIOS.PERIOD_5D && 'Simula 5 días desde la fecha elegida (~15 min/día)'}
-                        {s === SCENARIOS.COLLAPSE  && 'Prueba de estrés hasta el colapso'}
-                      </p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-
-              {selectedScenario === SCENARIOS.PERIOD_5D && (
+      {/* ── BARRA INFERIOR: dashboard de simulación (control · métricas · leyenda) ── */}
+      <div
+        className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-stretch"
+        style={{ right: infoPanelOpen ? 'calc(46% + 1.5rem)' : '1rem' }}
+      >
+        {/* Popovers (se abren hacia arriba) */}
+        <AnimatePresence>
+          {bottomPopover === 'config' && !session && (
+            <motion.div
+              key="pop-config"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+              className="w-[320px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4 max-h-[62vh] overflow-y-auto custom-scrollbar"
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-700 mb-3">Configurar simulación</p>
+              <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 block">
-                    Fecha de inicio
-                  </label>
-                  {availableDays.length === 0 ? (
-                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-400">
-                      Cargando fechas disponibles…
-                    </div>
-                  ) : (
-                    <AvailableDayPicker
-                      availableDays={availableDays}
-                      selected={startDate}
-                      onChange={setStartDate}
-                      disabled={isLoading}
-                    />
-                  )}
-                  {/* Hora de inicio */}
-                  <div className="flex items-center gap-2">
-                    <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600">
-                      Hora de inicio (UTC)
+                  {([SCENARIOS.PERIOD_5D, SCENARIOS.COLLAPSE] as SimulationScenario[]).map(s => (
+                    <label
+                      key={s}
+                      className={cn(
+                        'flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors',
+                        selectedScenario === s
+                          ? s === SCENARIOS.COLLAPSE
+                            ? 'border-rose-300 bg-rose-50'
+                            : 'border-indigo-300 bg-indigo-50'
+                          : 'border-slate-200 bg-white hover:bg-slate-50'
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="scenario"
+                        value={s}
+                        checked={selectedScenario === s}
+                        onChange={() => setSelectedScenario(s)}
+                        className="mt-0.5 accent-indigo-600"
+                      />
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            'text-[11px] font-black',
+                            selectedScenario === s
+                              ? s === SCENARIOS.COLLAPSE ? 'text-rose-700' : 'text-indigo-700'
+                              : 'text-slate-700'
+                          )}>
+                            {SCENARIO_LABELS[s]}
+                          </span>
+                          {s === SCENARIOS.COLLAPSE && (
+                            <span className="text-[8px] font-bold uppercase tracking-widest bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded-full">
+                              Stress test
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
+                          {s === SCENARIOS.PERIOD_5D && 'Simula 5 días desde la fecha elegida (~15 min/día)'}
+                          {s === SCENARIOS.COLLAPSE  && 'Prueba de estrés hasta el colapso'}
+                        </p>
+                      </div>
                     </label>
+                  ))}
+                </div>
+
+                {selectedScenario === SCENARIOS.PERIOD_5D && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 block">
+                      Fecha de inicio
+                    </label>
+                    {availableDays.length === 0 ? (
+                      <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-400">
+                        Cargando fechas disponibles…
+                      </div>
+                    ) : (
+                      <AvailableDayPicker
+                        availableDays={availableDays}
+                        selected={startDate}
+                        onChange={setStartDate}
+                        disabled={isLoading}
+                      />
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600">
+                        Hora de inicio (UTC)
+                      </label>
+                    </div>
+                    <input
+                      type="time"
+                      value={startTime}
+                      onChange={e => setStartTime(e.target.value)}
+                      disabled={isLoading}
+                      className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
+                    />
                   </div>
-                  <input
-                    type="time"
-                    value={startTime}
-                    onChange={e => setStartTime(e.target.value)}
-                    disabled={isLoading}
-                    className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
-                  />
-                </div>
-              )}
-
-              <button
-                onClick={handleCreate}
-                disabled={isLoading || (selectedScenario === SCENARIOS.PERIOD_5D && !startDate)}
-                className={cn(
-                  'w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-lg',
-                  selectedScenario === SCENARIOS.COLLAPSE
-                    ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20',
-                  'disabled:opacity-40 disabled:cursor-not-allowed'
                 )}
-              >
-                <Database className="w-4 h-4" />
-                {isLoading ? 'Inicializando…' : 'Iniciar Simulación'}
-              </button>
-            </div>
-          </CollapsiblePanel>
-        )}
 
-        {/* Control de sesión activa */}
-        {session && (
-          <CollapsiblePanel
-            title={`Simulación — ${session.status.toUpperCase()}`}
-            icon={<Activity className="w-4 h-4" />}
-            defaultOpen={false}
-          >
-            <div className="pt-3 space-y-3">
-              {/* Cartillas de tiempo */}
-              <div className="grid grid-cols-2 gap-2 text-center">
-                <div className="bg-indigo-50 rounded-xl p-2 border border-indigo-100">
-                  <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest mb-0.5">Tiempo simulado</p>
-                  <p className="text-sm font-black font-mono text-indigo-700">{formatSimElapsed(session.currentTimeAt || 0)}</p>
+                <button
+                  onClick={handleCreate}
+                  disabled={isLoading || (selectedScenario === SCENARIOS.PERIOD_5D && !startDate)}
+                  className={cn(
+                    'w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-lg',
+                    selectedScenario === SCENARIOS.COLLAPSE
+                      ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20',
+                    'disabled:opacity-40 disabled:cursor-not-allowed'
+                  )}
+                >
+                  <Database className="w-4 h-4" />
+                  {isLoading ? 'Inicializando…' : 'Iniciar Simulación'}
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {bottomPopover === 'legend' && (
+            <motion.div
+              key="pop-legend"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+              className="self-end w-[260px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4"
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-700 mb-3">Leyenda</p>
+              <div className="space-y-2.5">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Hubs</p>
+                <LegendRow dot="bg-emerald-500" label="Hub en estado óptimo" />
+                <LegendRow dot="bg-amber-500" label="Hub en alerta (>70% cap.)" />
+                <LegendRow dot="bg-red-500" label="Hub en punto crítico" />
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
+                <LegendRow dot="bg-emerald-500" label="Avión con carga normal" />
+                <LegendRow dot="bg-amber-500" label="Avión casi lleno (>70%)" />
+                <LegendRow dot="bg-red-500" label="Avión en capacidad crítica" />
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-6 h-0.5 bg-red-500 rounded" />
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta activa (con vuelo)</span>
                 </div>
-                <div className="bg-emerald-50 rounded-xl p-2 border border-emerald-100">
-                  <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-widest mb-0.5">Tiempo real</p>
-                  <p className="text-sm font-black font-mono text-emerald-700">{formatRealElapsed(elapsedRealMs)}</p>
+                <div className="flex items-center gap-2.5">
+                  <div className="flex gap-0.5">
+                    {[0,1,2].map(i => <div key={i} className="w-1.5 h-0.5 bg-slate-400" />)}
+                  </div>
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
+                </div>
+                <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400 leading-snug">
+                  Rueda del ratón para zoom · Arrastrar para desplazar
                 </div>
               </div>
-              <div className="bg-slate-50 rounded-xl p-2 border border-slate-100 text-center">
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Vuelos activos</p>
-                <p className="text-sm font-black font-mono text-indigo-700">{activePlanes.length}</p>
-              </div>
-              <div className="flex gap-2">
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Barra principal */}
+        <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xl px-3 py-2.5 flex items-center gap-2 flex-wrap">
+          {/* Marca + sesión */}
+          <div className="flex items-center gap-2 pr-1">
+            <MapIcon className="w-4 h-4 text-indigo-600 shrink-0" />
+            <div className="flex flex-col leading-none">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-900">Simulación</span>
+              <span className="text-[9px] font-mono text-slate-400">{session ? `${session.id.substring(0, 10)}…` : 'Sin sesión activa'}</span>
+            </div>
+            {session && (
+              <div className={cn('w-2 h-2 rounded-full shrink-0', simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
+            )}
+          </div>
+
+          {session ? (
+            <>
+              <div className="h-9 w-px bg-slate-200 mx-1" />
+              <BottomStat label="T. simulado" value={formatSimElapsed(session.currentTimeAt || 0)} className="text-indigo-700" />
+              <BottomStat label="T. real"     value={formatRealElapsed(elapsedRealMs)}            className="text-emerald-700" />
+              <BottomStat label="Vuelos act."  value={activePlanes.length}                          className="text-slate-700" />
+
+              <div className="flex gap-1.5 ml-1">
                 <button
                   onClick={simRunning ? pauseSimulation : startSimulation}
                   disabled={session.status === 'starting'}
                   className={cn(
-                    'flex-1 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all',
+                    'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
                     session.status === 'starting'
                       ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                       : simRunning
@@ -1368,7 +1384,7 @@ export const SimulationDashboardView: React.FC = () => {
                   )}
                 >
                   {session.status === 'starting'
-                    ? <><span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />Iniciando…</>
+                    ? <span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
                     : simRunning
                       ? <><Pause className="w-4 h-4" />Pausar</>
                       : <><Play className="w-4 h-4" />Reanudar</>
@@ -1376,260 +1392,107 @@ export const SimulationDashboardView: React.FC = () => {
                 </button>
                 <button
                   onClick={resetSimulation}
-                  className="px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 transition-all"
+                  className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 transition-all"
+                  title="Reiniciar"
                 >
                   <RotateCcw className="w-4 h-4" />
                 </button>
               </div>
-            </div>
-          </CollapsiblePanel>
-        )}
 
-        {/* Rastrear vuelo */}
-        {session && (
-          <CollapsiblePanel
-            title="Rastrear Vuelo"
-            icon={<Plane className="w-4 h-4" />}
-            defaultOpen={false}
-            className="max-w-[320px]"
-          >
-            <div className="pt-3 space-y-3">
-              {/* Buscador */}
-              <div className="relative">
-                <input
-                  type="text"
-                  value={flightQuery}
-                  onChange={e => setFlightQuery(e.target.value)}
-                  placeholder="ID vuelo, origen o destino…"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 outline-none focus:border-indigo-400 focus:bg-white transition-colors pr-7"
-                />
-                {flightQuery && (
-                  <button
-                    onClick={() => setFlightQuery('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
+              <div className="h-9 w-px bg-slate-200 mx-1" />
 
-              {/* Vuelo seleccionado — fijo encima del scroll */}
-              {selectedFlightId && selectedFlight && (() => {
-                const ap = activePlanes.find(p => p.flightId === selectedFlight.flightId);
-                // Carga: en vuelo → datos en vivo; aterrizó → last known desde SeenFlight
-                const occ = ap?.occupied ?? selectedFlight.lastOccupied;
-                const cap = ap?.capacity ?? selectedFlight.lastCapacity;
-                const pct = cap && cap > 0 && occ !== undefined ? Math.round((occ / cap) * 100) : null;
-                const lc = pct === null ? '#94a3b8' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
-                const borderClass = selectedFlight.isActive ? 'border-amber-300' : 'border-slate-200';
-                const bgClass = selectedFlight.isActive ? 'bg-amber-50' : 'bg-slate-50';
-                return (
-                  <div className={cn('rounded-xl border p-2.5', bgClass, borderClass)}>
-                    <div className="flex items-center gap-2">
-                      <div className={cn('w-2 h-2 rounded-full shrink-0', selectedFlight.isActive ? 'bg-amber-500 animate-pulse' : 'bg-slate-400')} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[10px] font-black text-slate-800 truncate">{selectedFlight.flightId}</p>
-                        <p className="text-[9px] text-slate-500 font-mono">
-                          {selectedFlight.fromIcao} → {selectedFlight.toIcao}
-                          {selectedFlight.scheduleId !== selectedFlight.flightId && (
-                            <span className="ml-1 text-slate-400">· {selectedFlight.scheduleId}</span>
-                          )}
-                        </p>
-                      </div>
-                      <button onClick={() => setSelectedFlightId(null)} className="text-[10px] text-slate-400 hover:text-slate-600 shrink-0 px-1">✕</button>
-                    </div>
-                    {pct !== null && cap! > 0 && (
-                      <div className="mt-2 pt-2 border-t border-slate-100">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-[9px] text-slate-500 font-semibold">
-                            {selectedFlight.isActive ? 'Carga' : 'Carga final'}
-                          </span>
-                          <span className="text-[9px] font-black font-mono" style={{ color: lc }}>{occ}/{cap} ({pct}%)</span>
-                        </div>
-                        <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
-                          <div className="h-full rounded-full" style={{ width: `${Math.min(100, pct)}%`, background: lc }} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* Lista de vuelos */}
-              <div className="max-h-44 overflow-y-auto custom-scrollbar space-y-1 pr-0.5">
-                {filteredFlights.length === 0 ? (
-                  <p className="text-[10px] text-slate-400 text-center py-3">
-                    {seenFlights.length === 0 ? 'Sin vuelos registrados aún' : 'Sin resultados'}
-                  </p>
-                ) : (
-                  filteredFlights.map(sf => {
-                    const isSelected = sf.flightId === selectedFlightId;
-                    const activePlane = activePlanes.find(p => p.flightId === sf.flightId);
-                    // Carga a mostrar: en vuelo → datos en vivo; aterrizó → last known
-                    const showOccupied = activePlane?.occupied ?? sf.lastOccupied;
-                    const showCapacity = activePlane?.capacity ?? sf.lastCapacity;
-                    const hasLoad = showCapacity && showCapacity > 0;
-                    const loadColor = hasLoad ? getPlaneColor(showOccupied!, showCapacity!, false) : '#94a3b8';
-                    // Horario sin fecha para mostrar el patrón de ruta
-                    const schedLabel = sf.scheduleId !== sf.flightId ? sf.scheduleId : null;
-                    return (
-                      <button
-                        key={sf.flightId}
-                        onClick={() => focusOnFlight(sf)}
-                        className={cn(
-                          'w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left transition-colors',
-                          isSelected
-                            ? 'bg-amber-50 border border-amber-300'
-                            : 'hover:bg-slate-50 border border-transparent'
-                        )}
-                      >
-                        <div className={cn(
-                          'w-1.5 h-1.5 rounded-full shrink-0',
-                          sf.isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
-                        )} />
-                        <div className="flex-1 min-w-0">
-                          <p className={cn('text-[10px] font-bold truncate', isSelected ? 'text-amber-700' : 'text-slate-700')}>
-                            {sf.flightId}
-                          </p>
-                          <p className="text-[9px] text-slate-400 font-mono">{sf.fromIcao} → {sf.toIcao}
-                            {schedLabel && <span className="ml-1 opacity-50">({schedLabel})</span>}
-                          </p>
-                          {hasLoad && (
-                            <p className="text-[9px] font-mono mt-0.5" style={{ color: loadColor }}>
-                              {sf.isActive ? 'Carga' : 'Carga final'}: {formatCapacity(showOccupied!, showCapacity!)}
-                            </p>
-                          )}
-                        </div>
-                        <span className={cn(
-                          'text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0',
-                          sf.isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                        )}>
-                          {sf.isActive ? 'En vuelo' : 'Aterrizó'}
-                        </span>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-
-              {seenFlights.length > 0 && (
-                <p className="text-[9px] text-slate-400 text-center">
-                  {seenFlights.filter(f => f.isActive).length} en vuelo · {seenFlights.filter(f => !f.isActive).length} aterrizados · {seenFlights.length} total
-                </p>
-              )}
-            </div>
-          </CollapsiblePanel>
-        )}
-
-        {/* Estado de Aeropuertos */}
-        {session && (
-          <CollapsiblePanel
-            title={`Aeropuertos${simAirportList.length > 0 ? ` (${simAirportList.length})` : ''}`}
-            icon={<Building2 className="w-4 h-4" />}
-            defaultOpen={false}
-          >
-            {/* Aeropuerto seleccionado — fijo encima del scroll */}
-            {(() => {
-              const sel = selectedAirportId ? simAirportList.find(a => a.icao === selectedAirportId) : null;
-              if (!sel) return null;
-              const lc = sel.occupancyLevel === 'RED' ? '#ef4444' : sel.occupancyLevel === 'AMBER' ? '#f59e0b' : '#10b981';
-              return (
-                <div className="mt-3 mb-1 rounded-xl border border-indigo-300 bg-indigo-50 px-2.5 py-2 flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: lc }} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-[10px] font-black font-mono text-indigo-700">{sel.icao}</span>
-                      <span className="text-[9px] font-bold font-mono" style={{ color: lc }}>{sel.load}/{sel.capacity}</span>
-                    </div>
-                    <div className="w-full h-1 bg-indigo-100 rounded-full overflow-hidden mt-1">
-                      <div className="h-full rounded-full" style={{ width: `${Math.min(100, sel.occupancyPct)}%`, background: lc }} />
-                    </div>
-                    <p className="text-[9px] text-indigo-400 mt-0.5 truncate">{sel.city} · {Math.round(sel.occupancyPct)}%</p>
-                  </div>
-                  <button onClick={() => setSelectedAirportId(null)} className="text-indigo-300 hover:text-indigo-600 shrink-0 px-1 text-xs">✕</button>
-                </div>
-              );
-            })()}
-            <div className="pt-1 space-y-1.5 max-h-52 overflow-y-auto custom-scrollbar pr-1">
-              {simAirportList.length === 0 ? (
-                <p className="text-[10px] text-slate-400 text-center py-4">
-                  {session ? 'Cargando datos de aeropuertos…' : 'Sin sesión activa'}
-                </p>
+              {dashboardMetrics ? (
+                <>
+                  <BottomStat label="Entregadas" value={dashboardMetrics.delivered}                 className="text-emerald-700" />
+                  <BottomStat label="Pendientes" value={dashboardMetrics.pending}                   className="text-amber-700" />
+                  <BottomStat label="En vuelo"   value={dashboardMetrics.inFlight}                  className="text-blue-700" />
+                  <BottomStat label="Asignadas"  value={dashboardMetrics.assigned}                  className="text-indigo-700" />
+                  <BottomStat label="SLA venc."  value={dashboardMetrics.slaBreaches}               className="text-red-600" />
+                  <BottomStat label="Rend./h"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                </>
               ) : (
-                [...simAirportList]
-                  .sort((a, b) => b.occupancyPct - a.occupancyPct)
-                  .map(airport => {
-                    const isSelected = selectedAirportId === airport.icao;
-                    const levelColor = airport.occupancyLevel === 'RED' ? '#ef4444'
-                      : airport.occupancyLevel === 'AMBER' ? '#f59e0b'
-                      : airport.occupancyLevel === 'GREEN' ? '#10b981'
-                      : '#94a3b8';
-                    return (
-                      <button
-                        key={airport.icao}
-                        onClick={() => { focusOnAirport(airport.icao); setSelectedFlightId(null); }}
-                        className={cn(
-                          'w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left transition-colors',
-                          isSelected
-                            ? 'bg-indigo-50 border border-indigo-300'
-                            : 'hover:bg-slate-50 border border-transparent'
-                        )}
-                      >
-                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: levelColor }} />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-1">
-                            <span className={cn('text-[10px] font-black font-mono', isSelected ? 'text-indigo-700' : 'text-slate-800')}>
-                              {airport.icao}
-                            </span>
-                            <span className="text-[9px] font-bold font-mono" style={{ color: levelColor }}>
-                              {airport.load}/{airport.capacity}
-                            </span>
-                          </div>
-                          <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden mt-1">
-                            <div className="h-full rounded-full transition-all duration-700"
-                              style={{ width: `${Math.min(100, airport.occupancyPct)}%`, background: levelColor }} />
-                          </div>
-                          <p className="text-[9px] text-slate-400 mt-0.5 truncate">{airport.city}</p>
-                        </div>
-                        <span className="text-[8px] font-bold font-mono shrink-0" style={{ color: levelColor }}>
-                          {Math.round(airport.occupancyPct)}%
-                        </span>
-                      </button>
-                    );
-                  })
+                <span className="text-[10px] text-slate-400 px-1">
+                  {session.status === 'starting' ? 'Iniciando…' : 'Cargando métricas…'}
+                </span>
               )}
-            </div>
-          </CollapsiblePanel>
-        )}
+            </>
+          ) : (
+            <>
+              <div className="h-9 w-px bg-slate-200 mx-1" />
+              <button
+                onClick={() => setBottomPopover(p => p === 'config' ? null : 'config')}
+                className={cn(
+                  'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
+                  bottomPopover === 'config' ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                )}
+              >
+                <Settings2 className="w-4 h-4" /> Configurar simulación
+                {bottomPopover === 'config' ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+              </button>
+            </>
+          )}
 
-        {/* Leyenda — mismos colores que Dashboard */}
-        <CollapsiblePanel title="Leyenda" icon={<MapIcon className="w-4 h-4" />}>
-          <div className="pt-3 space-y-2.5">
-            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Hubs</p>
-            <LegendRow dot="bg-emerald-500" label="Hub en estado óptimo" />
-            <LegendRow dot="bg-amber-500" label="Hub en alerta (>70% cap.)" />
-            <LegendRow dot="bg-red-500" label="Hub en punto crítico" />
-            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
-            <LegendRow dot="bg-emerald-500" label="Avión con carga normal" />
-            <LegendRow dot="bg-amber-500" label="Avión casi lleno (>70%)" />
-            <LegendRow dot="bg-red-500" label="Avión en capacidad crítica" />
-            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
-            <div className="flex items-center gap-2.5">
-              <div className="w-6 h-0.5 bg-red-500 rounded" />
-              <span className="text-[10px] font-semibold text-slate-600">Ruta activa (con vuelo)</span>
-            </div>
-            <div className="flex items-center gap-2.5">
-              <div className="flex gap-0.5">
-                {[0,1,2].map(i => <div key={i} className="w-1.5 h-0.5 bg-slate-400" />)}
-              </div>
-              <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
-            </div>
-            <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400 leading-snug">
-              Rueda del ratón para zoom · Arrastrar para desplazar
-            </div>
+          {/* Leyenda (siempre) */}
+          <div className="ml-auto pl-1">
+            <button
+              onClick={() => setBottomPopover(p => p === 'legend' ? null : 'legend')}
+              className={cn(
+                'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
+                bottomPopover === 'legend' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              )}
+            >
+              <MapIcon className="w-4 h-4" /> Leyenda
+              {bottomPopover === 'legend' ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+            </button>
           </div>
-        </CollapsiblePanel>
+        </div>
       </div>
+
+      {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos · Paquetes ──── */}
+      <AnimatePresence>
+        {infoPanelOpen && (
+          <motion.div
+            key="info-panel"
+            initial={{ x: 40, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 40, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+            className="absolute top-4 right-4 bottom-4 z-30 w-[46%] min-w-[400px] max-w-[640px] flex flex-col"
+          >
+            {/* Botón para colapsar el panel */}
+            <button
+              onClick={() => setInfoPanelOpen(false)}
+              className="absolute -left-3 top-1/2 -translate-y-1/2 z-10 w-7 h-12 bg-white rounded-l-xl border border-slate-200 shadow-lg flex items-center justify-center text-slate-500 hover:text-indigo-600 hover:bg-slate-50 transition-colors"
+              title="Ocultar paneles"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+            <SimulationInfoPanel
+              sessionId={session?.id ?? null}
+              hasSession={hasSession}
+              airports={simAirportList}
+              flights={simFlightList}
+              shipments={simShipmentList}
+              selectedAirportId={selectedAirportId}
+              selectedFlightId={selectedFlightId}
+              onSelectAirport={handleSelectAirportFromPanel}
+              onSelectFlight={focusOnSimFlight}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Botón para reabrir el panel cuando está colapsado */}
+      {!infoPanelOpen && (
+        <button
+          onClick={() => setInfoPanelOpen(true)}
+          className="absolute top-1/2 right-0 -translate-y-1/2 z-30 px-2 py-3 bg-white rounded-l-xl border border-slate-200 shadow-lg flex flex-col items-center gap-1.5 text-slate-600 hover:text-indigo-600 hover:bg-slate-50 transition-colors"
+          title="Mostrar paneles"
+        >
+          <ChevronLeft className="w-4 h-4" />
+          <LayoutGrid className="w-4 h-4" />
+        </button>
+      )}
 
       {/* ── MODAL: Simulación completada ─────────────────────────────────────── */}
       <AnimatePresence>

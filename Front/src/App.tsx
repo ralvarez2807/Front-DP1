@@ -166,8 +166,10 @@ function AppContent() {
               </div>
             </div>
 
-            {/* Dashboard de simulación — botón toggle */}
-            {session && (
+            {/* Dashboard de simulación — botón toggle.
+                En la vista de Simulación se oculta: sus métricas viven en la barra
+                inferior del mapa, para mantener el mapa limpio sin desplegables. */}
+            {session && activeView !== 'simulation' && (
               <div className="relative" ref={simDashRef}>
                 <button
                   onClick={() => setSimDashOpen(v => !v)}
