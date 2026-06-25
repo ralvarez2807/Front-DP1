@@ -51,7 +51,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   const { planes, airports } = useOperationsContext();
 
   // ── Panel lateral derecho ─────────────────────────────────────────────────
-  const [infoPanelOpen, setInfoPanelOpen] = useState(true);
+  const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   const [infoPanelTab, setInfoPanelTab]   = useState<'airports' | 'flights' | 'packages'>('airports');
 
   // ── Estado de selección ──────────────────────────────────────────────────
