@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, Plane, Package, Search, X, ChevronRight, ChevronDown, Luggage } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -30,6 +30,14 @@ interface Props {
   selectedFlightId: string | null;
   onSelectAirport: (icao: string) => void;
   onSelectFlight: (flight: SimFlight) => void;
+  onSelectShipment?: (shipment: SimShipment) => void;
+  /** shipmentIds con al menos una maleta en el aire ahora mismo (de eventos WS BAGGAGE_DEPARTED) */
+  shipmentsInFlight?: Set<string>;
+  activeTab?: Tab;
+  onTabChange?: (tab: Tab) => void;
+  currentSimMs?: number;
+  /** flightIds que el WS confirma como en vuelo ahora mismo (fuente de verdad sobre el API) */
+  activeFlightIds?: Set<string>;
 }
 
 // Estado de carga perezosa de un detalle de maletas
@@ -49,16 +57,23 @@ const FLIGHT_STATUS: Record<string, { label: string; cls: string }> = {
   ARRIVED:   { label: 'ATERRIZADO', cls: 'bg-indigo-100 text-indigo-700' },
 };
 
-function shipmentStatus(s: SimShipment): { label: string; cls: string; dot: string } {
+function shipmentStatus(
+  s: SimShipment,
+  shipmentsInFlight?: Set<string>,
+): { label: string; cls: string; dot: string } {
   if (s.totalBaggages > 0 && s.delivered >= s.totalBaggages)
-    return { label: 'ENTREGADO', cls: 'bg-emerald-100 text-emerald-700', dot: '#10b981' };
+    return { label: 'ENTREGADO',  cls: 'bg-emerald-100 text-emerald-700', dot: '#10b981' };
   if (s.noRoute > 0)
-    return { label: 'SIN RUTA', cls: 'bg-red-100 text-red-700', dot: '#ef4444' };
+    return { label: 'SIN RUTA',   cls: 'bg-red-100 text-red-700',         dot: '#ef4444' };
   if (s.late > 0)
-    return { label: 'ATRASADO', cls: 'bg-amber-100 text-amber-700', dot: '#f59e0b' };
-  if (s.delivered > 0 || s.onTime > 0)
-    return { label: 'EN RUTA', cls: 'bg-blue-100 text-blue-700', dot: '#3b82f6' };
-  return { label: 'PENDIENTE', cls: 'bg-slate-100 text-slate-500', dot: '#94a3b8' };
+    return { label: 'ATRASADO',   cls: 'bg-amber-100 text-amber-700',     dot: '#f59e0b' };
+  if (s.delivered > 0 || s.onTime > 0) {
+    // Diferenciar "maleta en el aire ahora" de "maleta esperando con ruta asignada"
+    if (shipmentsInFlight?.has(s.shipmentId))
+      return { label: 'EN VUELO',   cls: 'bg-indigo-100 text-indigo-700',   dot: '#6366f1' };
+    return   { label: 'ASIGNADO',   cls: 'bg-blue-100 text-blue-700',       dot: '#3b82f6' };
+  }
+  return     { label: 'PENDIENTE',  cls: 'bg-slate-100 text-slate-500',     dot: '#94a3b8' };
 }
 
 function fmtTime(iso?: string): string {
@@ -190,11 +205,41 @@ function BaggagePanel({ state, kind }: {
 }
 
 // ── Panel principal ──────────────────────────────────────────────────────────
+// Devuelve el estado efectivo de un vuelo.
+// activeFlightIds = aviones físicamente en el mapa (activePlanes) — es la fuente de verdad.
+// Un vuelo es "En vuelo" si y solo si su avión está en el mapa.
+function effectiveStatus(f: SimFlight, currentSimMs?: number, activeFlightIds?: Set<string>): string {
+  if (f.status === 'ARRIVED') return 'ARRIVED';
+  if (f.status === 'CANCELLED') return 'CANCELLED';
+
+  // Si tenemos el set de aviones en mapa, es la fuente de verdad definitiva
+  if (activeFlightIds !== undefined) {
+    return activeFlightIds.has(f.flightId) ? 'DEPARTED' : 'SCHEDULED';
+  }
+
+  // Fallback sin set: el API dice DEPARTED pero sim-time aún no llegó a la salida
+  if (
+    f.status === 'DEPARTED' &&
+    currentSimMs !== undefined &&
+    f.depTime &&
+    new Date(f.depTime).getTime() > currentSimMs
+  ) {
+    return 'SCHEDULED';
+  }
+  return f.status;
+}
+
 export const SimulationInfoPanel: React.FC<Props> = ({
   sessionId, hasSession, airports, flights, shipments,
-  selectedAirportId, selectedFlightId, onSelectAirport, onSelectFlight,
+  selectedAirportId, selectedFlightId, onSelectAirport, onSelectFlight, onSelectShipment,
+  activeTab: controlledTab, onTabChange, currentSimMs, activeFlightIds, shipmentsInFlight,
 }) => {
-  const [tab, setTab] = useState<Tab>('airports');
+  const [localTab, setLocalTab] = useState<Tab>('airports');
+  const tab = controlledTab ?? localTab;
+  const setTab = (t: Tab) => { setLocalTab(t); onTabChange?.(t); };
+
+  // Ref al contenedor de la lista activa para hacer scroll al top
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Cachés de maletas por aeropuerto / vuelo (carga perezosa al seleccionar)
   const [airportBags, setAirportBags] = useState<Record<string, LoadState<AirportBaggage>>>({});
@@ -224,15 +269,20 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, selectedFlightId]);
 
-  // Filtros — aeropuertos
+  // Filtros y ordenamiento — aeropuertos
   const [apQuery, setApQuery]   = useState('');
   const [apRegion, setApRegion] = useState('');
   const [apOcc, setApOcc]       = useState('');
+  const [apSort, setApSort]     = useState<'load' | 'name' | 'region'>('load');
 
-  // Filtros — vuelos
+  // Filtros y ordenamiento — vuelos
   const [flQuery, setFlQuery]   = useState('');
   const [flStatus, setFlStatus] = useState('');
   const [flLoad, setFlLoad]     = useState('');
+  const [flSort, setFlSort]     = useState<'dep' | 'arr' | 'load' | 'route'>('dep');
+
+  // Filtros y ordenamiento — envíos
+  const [pkSort, setPkSort]     = useState<'deadline' | 'status' | 'progress' | 'route'>('deadline');
 
   // Filtros — paquetes
   const [pkQuery, setPkQuery]   = useState('');
@@ -255,40 +305,121 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         if (apOcc === 'low'  && a.occupancyPct >= 60) return false;
         return true;
       })
-      .sort((a, b) => b.occupancyPct - a.occupancyPct);
-  }, [airports, apQuery, apRegion, apOcc]);
+      .sort((a, b) => {
+        switch (apSort) {
+          case 'name':   return a.city.localeCompare(b.city);
+          case 'region': return (a.continent ?? '').localeCompare(b.continent ?? '') || a.city.localeCompare(b.city);
+          case 'load':
+          default:       return b.occupancyPct - a.occupancyPct;
+        }
+      });
+  }, [airports, apQuery, apRegion, apOcc, apSort]);
 
-  // ── Vuelos filtrados ────────────────────────────────────────────────────────
-  const STATUS_RANK: Record<string, number> = { DEPARTED: 0, SCHEDULED: 1, ARRIVED: 2 };
+  // ── Vuelos filtrados y ordenados ─────────────────────────────────────────────
+  // "En vuelo" siempre primero; dentro de cada grupo, el criterio elegido por el usuario.
+  const STATUS_RANK: Record<string, number> = { DEPARTED: 0, SCHEDULED: 1, ARRIVED: 2, CANCELLED: 3 };
   const filteredFlights = useMemo(() => {
     const q = flQuery.trim().toUpperCase();
-    return flights
-      .filter(f => {
-        if (q && !f.flightId.toUpperCase().includes(q) && !f.fromIcao.includes(q) && !f.toIcao.includes(q)) return false;
-        if (flStatus && f.status !== flStatus) return false;
-        if (flLoad === 'high' && f.occupancyPct < 85) return false;
-        if (flLoad === 'mid'  && (f.occupancyPct < 60 || f.occupancyPct >= 85)) return false;
-        if (flLoad === 'low'  && f.occupancyPct >= 60) return false;
-        return true;
-      })
-      .sort((a, b) => {
-        const r = (STATUS_RANK[a.status] ?? 3) - (STATUS_RANK[b.status] ?? 3);
-        if (r !== 0) return r;
-        return new Date(a.depTime).getTime() - new Date(b.depTime).getTime();
-      });
-  }, [flights, flQuery, flStatus, flLoad]);
+    const filtered = flights.filter(f => {
+      const eff = effectiveStatus(f, currentSimMs, activeFlightIds);
+      if (q && !f.flightId.toUpperCase().includes(q) && !f.fromIcao.includes(q) && !f.toIcao.includes(q)) return false;
+      if (flStatus && eff !== flStatus) return false;
+      if (flLoad === 'high' && f.occupancyPct < 85) return false;
+      if (flLoad === 'mid'  && (f.occupancyPct < 60 || f.occupancyPct >= 85)) return false;
+      if (flLoad === 'low'  && f.occupancyPct >= 60) return false;
+      return true;
+    });
+
+    return filtered.sort((a, b) => {
+      // Primero: estado (En vuelo siempre arriba)
+      const effA = effectiveStatus(a, currentSimMs, activeFlightIds);
+      const effB = effectiveStatus(b, currentSimMs, activeFlightIds);
+      const statusDiff = (STATUS_RANK[effA] ?? 3) - (STATUS_RANK[effB] ?? 3);
+      if (statusDiff !== 0) return statusDiff;
+
+      // Segundo: criterio elegido por el usuario
+      switch (flSort) {
+        case 'arr':
+          return new Date(a.arrTime).getTime() - new Date(b.arrTime).getTime();
+        case 'load':
+          return b.occupancyPct - a.occupancyPct;
+        case 'route':
+          return `${a.fromIcao}-${a.toIcao}`.localeCompare(`${b.fromIcao}-${b.toIcao}`);
+        case 'dep':
+        default:
+          return new Date(a.depTime).getTime() - new Date(b.depTime).getTime();
+      }
+    });
+  }, [flights, flQuery, flStatus, flLoad, flSort, currentSimMs, activeFlightIds]);
 
   // ── Paquetes filtrados ──────────────────────────────────────────────────────
+  const SHIPMENT_STATUS_RANK: Record<string, number> = {
+    'EN VUELO': 0, 'ATRASADO': 1, 'ASIGNADO': 2, 'PENDIENTE': 3, 'SIN RUTA': 4, 'ENTREGADO': 5,
+  };
   const filteredShipments = useMemo(() => {
     const q = pkQuery.trim().toUpperCase();
     const r = pkRoute.trim().toUpperCase();
-    return shipments.filter(s => {
-      if (q && !s.shipmentId.toUpperCase().includes(q)) return false;
-      if (r && !s.originIcao.includes(r) && !s.destIcao.includes(r)) return false;
-      if (pkStatus && shipmentStatus(s).label !== pkStatus) return false;
-      return true;
-    });
-  }, [shipments, pkQuery, pkRoute, pkStatus]);
+    return shipments
+      .filter(s => {
+        if (q && !s.shipmentId.toUpperCase().includes(q)) return false;
+        if (r && !s.originIcao.includes(r) && !s.destIcao.includes(r)) return false;
+        if (pkStatus && shipmentStatus(s, shipmentsInFlight).label !== pkStatus) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        // "En ruta" y "Atrasado" siempre antes de pendientes y entregados
+        const stA = SHIPMENT_STATUS_RANK[shipmentStatus(a, shipmentsInFlight).label] ?? 5;
+        const stB = SHIPMENT_STATUS_RANK[shipmentStatus(b, shipmentsInFlight).label] ?? 5;
+        if (stA !== stB) return stA - stB;
+
+        switch (pkSort) {
+          case 'status':
+            return stA - stB;
+          case 'progress': {
+            const pctA = a.totalBaggages > 0 ? a.delivered / a.totalBaggages : 0;
+            const pctB = b.totalBaggages > 0 ? b.delivered / b.totalBaggages : 0;
+            return pctA - pctB; // menos progreso primero
+          }
+          case 'route':
+            return `${a.originIcao}-${a.destIcao}`.localeCompare(`${b.originIcao}-${b.destIcao}`);
+          case 'deadline':
+          default:
+            return new Date(a.deadlineUtc).getTime() - new Date(b.deadlineUtc).getTime();
+        }
+      });
+  }, [shipments, pkQuery, pkRoute, pkStatus, pkSort]);
+
+  // Orden con ítem seleccionado siempre primero
+  const sortedAirports = useMemo(() => {
+    if (!selectedAirportId) return filteredAirports;
+    const idx = filteredAirports.findIndex(a => a.icao === selectedAirportId);
+    if (idx <= 0) return filteredAirports;
+    const copy = [...filteredAirports];
+    copy.unshift(...copy.splice(idx, 1));
+    return copy;
+  }, [filteredAirports, selectedAirportId]);
+
+  const sortedFlights = useMemo(() => {
+    if (!selectedFlightId) return filteredFlights;
+    const idx = filteredFlights.findIndex(f => f.flightId === selectedFlightId);
+    if (idx <= 0) return filteredFlights;
+    const copy = [...filteredFlights];
+    copy.unshift(...copy.splice(idx, 1));
+    return copy;
+  }, [filteredFlights, selectedFlightId]);
+
+  // Scroll al inicio cuando cambia el ítem seleccionado (el seleccionado está en la cima)
+  useEffect(() => {
+    if (selectedAirportId && tab === 'airports' && listRef.current) {
+      listRef.current.scrollTop = 0;
+    }
+  }, [selectedAirportId, tab]);
+
+  useEffect(() => {
+    if (selectedFlightId && tab === 'flights' && listRef.current) {
+      listRef.current.scrollTop = 0;
+    }
+  }, [selectedFlightId, tab]);
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode; count: number }[] = [
     { id: 'airports', label: 'Aeropuertos', icon: <Building2 className="w-4 h-4" />, count: airports.length },
@@ -346,6 +477,11 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   { value: 'mid',  label: 'Alerta (60-85%)' },
                   { value: 'low',  label: 'Óptima (<60%)' },
                 ]} />
+                <FilterSelect value={apSort} onChange={v => setApSort(v as typeof apSort)} options={[
+                  { value: 'load',   label: 'Ordenar: Carga' },
+                  { value: 'name',   label: 'Ordenar: Nombre' },
+                  { value: 'region', label: 'Ordenar: Región' },
+                ]} />
               </div>
               <div className="grid grid-cols-[1.6fr_0.9fr_1.4fr_auto] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
                 <ColHead>Nombre / IATA</ColHead>
@@ -353,11 +489,11 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <ColHead>Ocupación</ColHead>
                 <ColHead className="text-right">Estado</ColHead>
               </div>
-              {filteredAirports.length === 0
+              {sortedAirports.length === 0
                 ? <EmptyState hasSession={hasSession} kind="airports" />
                 : (
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                    {filteredAirports.map(a => {
+                  <div ref={listRef} className="flex-1 overflow-y-auto custom-scrollbar">
+                    {sortedAirports.map(a => {
                       const color = occColor(a.occupancyLevel, a.occupancyPct);
                       const selected = selectedAirportId === a.icao;
                       return (
@@ -414,6 +550,12 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   { value: 'mid',  label: 'Media (60-85%)' },
                   { value: 'low',  label: 'Baja (<60%)' },
                 ]} />
+                <FilterSelect value={flSort} onChange={v => setFlSort(v as typeof flSort)} options={[
+                  { value: 'dep',   label: 'Ordenar: Salida' },
+                  { value: 'arr',   label: 'Ordenar: Llegada' },
+                  { value: 'load',  label: 'Ordenar: Carga' },
+                  { value: 'route', label: 'Ordenar: Ruta' },
+                ]} />
               </div>
               <div className="grid grid-cols-[1.1fr_1.3fr_1fr_1.2fr_auto] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
                 <ColHead>ID</ColHead>
@@ -422,12 +564,13 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <ColHead>Carga</ColHead>
                 <ColHead className="text-right">ETA</ColHead>
               </div>
-              {filteredFlights.length === 0
+              {sortedFlights.length === 0
                 ? <EmptyState hasSession={hasSession} kind="flights" />
                 : (
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                    {filteredFlights.slice(0, MAX_ROWS).map(f => {
-                      const st = FLIGHT_STATUS[f.status] ?? { label: f.status, cls: 'bg-slate-100 text-slate-500' };
+                  <div ref={listRef} className="flex-1 overflow-y-auto custom-scrollbar">
+                    {sortedFlights.slice(0, MAX_ROWS).map(f => {
+                      const eff = effectiveStatus(f, currentSimMs, activeFlightIds);
+                      const st = FLIGHT_STATUS[eff] ?? { label: eff, cls: 'bg-slate-100 text-slate-500' };
                       const color = occColor(f.occupancyLevel, f.occupancyPct);
                       const selected = selectedFlightId === f.flightId;
                       return (
@@ -464,15 +607,15 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               <Bar pct={f.occupancyPct} color={color} />
                             </div>
                             <div className="text-right leading-tight">
-                              <p className="text-[10px] font-mono text-slate-400">{fmtTime(f.depTime)} sal</p>
-                              <p className="text-[13px] font-black font-mono text-slate-700">{fmtTime(f.arrTime)} lle</p>
+                              <p className="text-[10px] font-mono text-slate-400">{fmtDayTime(f.depTime)} sal</p>
+                              <p className="text-[10px] font-mono text-slate-500">{fmtDayTime(f.arrTime)} lle</p>
                             </div>
                           </button>
                           {selected && <BaggagePanel state={flightBags[f.flightId]} kind="flight" />}
                         </div>
                       );
                     })}
-                    {filteredFlights.length > MAX_ROWS && <TruncatedHint total={filteredFlights.length} />}
+                    {sortedFlights.length > MAX_ROWS && <TruncatedHint total={sortedFlights.length} />}
                   </div>
                 )}
             </>
@@ -484,14 +627,21 @@ export const SimulationInfoPanel: React.FC<Props> = ({
               <div className="flex flex-wrap gap-2 p-3 border-b border-slate-100">
                 <SearchInput value={pkQuery} onChange={setPkQuery} placeholder="ID de envío…" />
                 <FilterSelect value={pkStatus} onChange={setPkStatus} options={[
-                  { value: '', label: 'Estado' },
-                  { value: 'ENTREGADO', label: 'Entregado' },
-                  { value: 'EN RUTA',   label: 'En ruta' },
+                  { value: '',          label: 'Estado' },
+                  { value: 'EN VUELO',  label: 'En vuelo' },
+                  { value: 'ASIGNADO',  label: 'Asignado' },
                   { value: 'ATRASADO',  label: 'Atrasado' },
+                  { value: 'ENTREGADO', label: 'Entregado' },
                   { value: 'SIN RUTA',  label: 'Sin ruta' },
                   { value: 'PENDIENTE', label: 'Pendiente' },
                 ]} />
                 <SearchInput value={pkRoute} onChange={setPkRoute} placeholder="Origen / Destino…" />
+                <FilterSelect value={pkSort} onChange={v => setPkSort(v as typeof pkSort)} options={[
+                  { value: 'deadline', label: 'Ordenar: Deadline' },
+                  { value: 'status',   label: 'Ordenar: Estado' },
+                  { value: 'progress', label: 'Ordenar: Progreso' },
+                  { value: 'route',    label: 'Ordenar: Ruta' },
+                ]} />
               </div>
               <div className="grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
                 <ColHead>ID Envío</ColHead>
@@ -504,12 +654,17 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 : (
                   <div className="flex-1 overflow-y-auto custom-scrollbar">
                     {filteredShipments.slice(0, MAX_ROWS).map(s => {
-                      const st = shipmentStatus(s);
+                      const st = shipmentStatus(s, shipmentsInFlight);
                       const pct = s.totalBaggages > 0 ? (s.delivered / s.totalBaggages) * 100 : 0;
                       return (
                         <div
                           key={s.shipmentId}
-                          className="w-full grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 items-center px-4 py-3 text-left border-b border-slate-50"
+                          onClick={st.label === 'EN VUELO' && onSelectShipment ? () => onSelectShipment(s) : undefined}
+                          className={cn(
+                            'w-full grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 items-center px-4 py-3 text-left border-b border-slate-50',
+                            st.label === 'EN VUELO' && onSelectShipment && 'cursor-pointer hover:bg-indigo-50/40 transition-colors',
+                          )}
+                          title={st.label === 'EN VUELO' ? 'Click para localizar el avión' : undefined}
                         >
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: st.dot }} />
@@ -550,8 +705,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         {tab === 'airports' && <span>{filteredAirports.length} de {airports.length} aeropuertos</span>}
         {tab === 'flights'  && (
           <span>
-            {flights.filter(f => f.status === 'DEPARTED').length} en vuelo ·{' '}
-            {flights.filter(f => f.status === 'SCHEDULED').length} programados · {flights.length} total
+            {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'DEPARTED').length} en vuelo ·{' '}
+            {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'SCHEDULED').length} programados · {flights.length} total
           </span>
         )}
         {tab === 'packages' && (

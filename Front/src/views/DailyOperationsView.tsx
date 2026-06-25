@@ -1,86 +1,71 @@
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Package, CheckCircle2, AlertTriangle, Globe, BarChart3, Map as MapIcon,
-  Plane, ChevronDown, ChevronUp, ZoomIn, ZoomOut, Radio, Clock, Activity,
+  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider';
 import { AnimatedPlane } from '../components/map/AnimatedPlane';
+import { SimulationInfoPanel } from './SimulationInfoPanel';
+import type { SimAirport, SimFlight } from '../services/simulationService';
 import { cn } from '../lib/utils';
 
-// Países sin operación que podrían caer dentro del recuadro de la región y se ocultan
-// para que el mapa solo muestre la zona de vuelos (ISO 3166-1 numérico, como en
-// world-atlas): EE.UU. 840, Canadá 124, Rusia 643, Australia 36, Antártida 10,
-// Groenlandia 304, Nueva Zelanda 554.
-const HIDDEN_COUNTRY_IDS = new Set([840, 124, 643, 36, 10, 304, 554]);
-
-// ── Reloj ──────────────────────────────────────────────────────────────────
-const MONTHS_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-function fmtDate(d: Date) {
-  return `${String(d.getUTCDate()).padStart(2,'0')} ${MONTHS_ES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-}
-function fmtTime(d: Date) {
-  return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
-}
-
-// ── Panel colapsable flotante ──────────────────────────────────────────────
-function CollapsiblePanel({
-  title, icon, defaultOpen = false, children, className,
-}: {
-  title: string; icon: React.ReactNode; defaultOpen?: boolean;
-  children: React.ReactNode; className?: string;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
+function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
-    <div className={cn(
-      'bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xl overflow-hidden min-w-[220px] max-w-[300px]',
-      className,
-    )}>
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-blue-600">{icon}</span>
-          <span className="text-[11px] font-black uppercase tracking-widest text-slate-700">{title}</span>
-        </div>
-        {open ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-               : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: 'easeInOut' }}
-            className="overflow-hidden"
-          >
-            <div className="px-4 pb-4 border-t border-slate-100">{children}</div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <div className="flex items-center gap-2.5">
+      <div className={cn('w-3 h-3 rounded-full shrink-0', dot)} />
+      <span className="text-[10px] font-semibold text-slate-600">{label}</span>
     </div>
   );
 }
 
+// ── Conversor: OpsAirportLoad → SimAirport ─────────────────────────────────
+function toSimAirport(a: {
+  icao: string; city: string; continent: string; load: number; capacity: number;
+}): SimAirport {
+  const pct = a.capacity > 0 ? (a.load / a.capacity) * 100 : 0;
+  const level = a.load === 0 ? 'EMPTY' : pct >= 90 ? 'RED' : pct >= 70 ? 'AMBER' : 'GREEN';
+  return { icao: a.icao, city: a.city, continent: a.continent, load: a.load, capacity: a.capacity, occupancyPct: pct, occupancyLevel: level };
+}
+
+// ── Conversor: OpsPlane → SimFlight ────────────────────────────────────────
+function toSimFlight(p: OpsPlane): SimFlight {
+  const pct = p.capacity > 0 ? (p.occupied / p.capacity) * 100 : 0;
+  const level = pct >= 90 ? 'RED' : pct >= 70 ? 'AMBER' : 'GREEN';
+  return {
+    flightId: p.flightId,
+    fromIcao: p.fromIcao,
+    toIcao: p.toIcao,
+    depTime: new Date(p.startedAt).toISOString(),
+    arrTime: new Date(p.startedAt + p.durationMs).toISOString(),
+    status: 'DEPARTED',
+    load: p.occupied,
+    capacity: p.capacity,
+    occupancyPct: pct,
+    occupancyLevel: level,
+  };
+}
+
 export const DailyOperationsView: React.FC = React.memo(() => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
-  const { ops, connected, planes, airports, metrics, events, lastSimUpdate, activeFlightCount } = useOperationsContext();
+  const { planes, airports } = useOperationsContext();
 
-  // ── Reloj simulado en vivo (≈ tiempo real con speedFactor=1) ───────────────
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(id);
-  }, []);
-  const displayDate = useMemo(() => {
-    const sf = ops?.speedFactor ?? 1;
-    if (lastSimUpdate) return new Date(lastSimUpdate.simMs + (now - lastSimUpdate.realMs) * sf);
-    if (ops?.simTime) return new Date(ops.simTime);
-    return new Date(now);
-  }, [now, lastSimUpdate, ops?.speedFactor, ops?.simTime]);
+  // ── Panel lateral derecho ─────────────────────────────────────────────────
+  const [infoPanelOpen, setInfoPanelOpen] = useState(true);
+  const [infoPanelTab, setInfoPanelTab]   = useState<'airports' | 'flights' | 'packages'>('airports');
+
+  // ── Estado de selección ──────────────────────────────────────────────────
+  const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
+  const [selectedFlightId,  setSelectedFlightId]  = useState<string | null>(null);
+  const [legendOpen, setLegendOpen] = useState(false);
+
+  // ── Tooltips ─────────────────────────────────────────────────────────────
+  const [hubTooltip, setHubTooltip] = useState<{
+    hub: typeof projectedHubs[0]; screenX: number; screenY: number;
+  } | null>(null);
+  const [planeTooltip, setPlaneTooltip] = useState<{
+    plane: OpsPlane; screenX: number; screenY: number;
+  } | null>(null);
 
   // ── Zoom / Pan ─────────────────────────────────────────────────────────────
   const svgRef = useRef<SVGSVGElement>(null);
@@ -124,18 +109,43 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   }, [clamp]);
 
   const handleMouseUp = useCallback(() => { isPanning.current = false; }, []);
-  // La proyección ya viene encuadrada en la región (MapProvider.fitExtent), así que
-  // restablecer = vista completa del lienzo (= región), sin zonas sin vuelos.
   const resetZoom = useCallback(() => setViewTransform({ x: 0, y: 0, k: 1 }), []);
-  const zoomBy = useCallback((factor: number) => {
-    setViewTransform(prev => {
-      const cx = MAP_VIEWBOX.width / 2, cy = MAP_VIEWBOX.height / 2;
-      const rawK = prev.k * factor;
-      return clamp(cx - (rawK / prev.k) * (cx - prev.x), cy - (rawK / prev.k) * (cy - prev.y), rawK);
-    });
-  }, [clamp]);
+  const zoomIn  = useCallback(() => setViewTransform(prev => {
+    const cx = MAP_VIEWBOX.width / 2, cy = MAP_VIEWBOX.height / 2;
+    const rawK = prev.k * 1.5;
+    return clamp(cx - (rawK / prev.k) * (cx - prev.x), cy - (rawK / prev.k) * (cy - prev.y), rawK);
+  }), [clamp]);
+  const zoomOut = useCallback(() => setViewTransform(prev => {
+    const cx = MAP_VIEWBOX.width / 2, cy = MAP_VIEWBOX.height / 2;
+    const rawK = prev.k / 1.5;
+    return clamp(cx - (rawK / prev.k) * (cx - prev.x), cy - (rawK / prev.k) * (cy - prev.y), rawK);
+  }), [clamp]);
 
-  // ── Rutas deduplicadas ──────────────────────────────────────────────────────
+  // ── Zoom hacia hub seleccionado ───────────────────────────────────────────
+  const focusOnAirport = useCallback((icao: string) => {
+    setSelectedAirportId(prev => prev === icao ? null : icao);
+    const hub = projectedHubs.find(h => h.id === icao);
+    if (!hub) return;
+    const targetK = 5;
+    const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
+    setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
+  }, [projectedHubs, clamp]);
+
+  // ── Zoom hacia avión seleccionado ─────────────────────────────────────────
+  const focusOnPlane = useCallback((plane: OpsPlane) => {
+    setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId);
+    setInfoPanelTab('flights');
+    const origin = projectedHubs.find(h => h.id === plane.fromIcao);
+    const dest   = projectedHubs.find(h => h.id === plane.toIcao);
+    if (!origin || !dest) return;
+    const cx = (origin.projectedX! + dest.projectedX!) / 2;
+    const cy = (origin.projectedY! + dest.projectedY!) / 2;
+    const targetK = 4;
+    const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
+    setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
+  }, [projectedHubs, clamp]);
+
+  // ── Rutas deduplicadas ─────────────────────────────────────────────────────
   const uniqueRoutes = useMemo(() => {
     const seen = new Set<string>();
     return projectedFlights.filter(f => {
@@ -146,7 +156,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     });
   }, [projectedFlights]);
 
-  // ── Pares de ruta con vuelo activo ──────────────────────────────────────────
+  // ── Pares de ruta activos ─────────────────────────────────────────────────
   const activeRoutePairs = useMemo(() => {
     const s = new Set<string>();
     planes.forEach(p => s.add(`${p.fromIcao}-${p.toIcao}`));
@@ -161,28 +171,27 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   const hubIndex = useMemo(() => new Map(projectedHubs.map(h => [h.id, h])), [projectedHubs]);
 
-  // ── Tooltip de avión ────────────────────────────────────────────────────────
-  const [planeTip, setPlaneTip] = useState<{ plane: OpsPlane; x: number; y: number } | null>(null);
+  // ── Ruta / hub del vuelo seleccionado ─────────────────────────────────────
+  const selectedPlane  = useMemo(() => planes.find(p => p.flightId === selectedFlightId) ?? null, [planes, selectedFlightId]);
+  const selectedFlight = useMemo(() => selectedPlane ? toSimFlight(selectedPlane) : null, [selectedPlane]);
 
-  // ── Carga viva por hub (desde el snapshot del backend) ──────────────────────
-  const hubLoad = useCallback((icao: string, fallbackCap: number) => {
-    const a = airports.get(icao);
-    const capacity = a?.capacity || fallbackCap || 0;
-    const load = a?.load ?? 0;
-    const pct = capacity > 0 ? (load / capacity) * 100 : 0;
-    return { load, capacity, pct };
-  }, [airports]);
+  const INACTIVE_OPACITY = selectedFlightId || selectedAirportId ? 0.04 : 0.08;
 
-  const statusColor = (pct: number) => pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+  // ── Datos convertidos para SimulationInfoPanel ────────────────────────────
+  const opsAirportList = useMemo((): SimAirport[] =>
+    Array.from(airports.values()).map(toSimAirport),
+  [airports]);
 
-  // Resumen de carga total
-  const totalLoad = useMemo(() => {
-    let load = 0, pending = 0;
-    airports.forEach(a => { load += a.load; pending += a.pending; });
-    return { load, pending };
-  }, [airports]);
+  const opsFlightList = useMemo((): SimFlight[] =>
+    planes.map(toSimFlight),
+  [planes]);
 
-  const statusLabel = ops?.status ?? '—';
+  // Todos los flightIds de planes son "activos" (están en el mapa)
+  const activeFlightIds = useMemo(() => new Set(planes.map(p => p.flightId)), [planes]);
+
+  // Color de hub por ocupación
+  const hubColor = (pct: number, empty: boolean) =>
+    empty ? '#94a3b8' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -202,7 +211,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       >
         <defs>
           <filter id="ops-glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feGaussianBlur stdDeviation="2" result="blur" />
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
           <filter id="ops-plane-glow" x="-100%" y="-100%" width="300%" height="300%">
@@ -212,13 +221,13 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         </defs>
 
         <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
+          {/* Océano */}
           <rect x="0" y="0" width={MAP_VIEWBOX.width} height={MAP_VIEWBOX.height} fill="#a8cfe8" />
 
+          {/* Países — todos sin filtrar */}
           {worldData && pathGenerator && (
             <g className="countries">
-              {worldData.features
-                .filter((feature: any) => !HIDDEN_COUNTRY_IDS.has(Number(feature.id)))
-                .map((feature: any, i: number) => (
+              {worldData.features.map((feature: any, i: number) => (
                 <path
                   key={i}
                   d={pathGenerator(feature) || ''}
@@ -236,15 +245,44 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             {uniqueRoutes.map(flight => {
               const isActive = activeRoutePairs.has(`${flight.originId}-${flight.destinationId}`) ||
                                activeRoutePairs.has(`${flight.destinationId}-${flight.originId}`);
+              const isSelected = selectedFlight &&
+                ((flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
+                 (flight.originId === selectedFlight.toIcao   && flight.destinationId === selectedFlight.fromIcao));
+
+              if (isSelected) {
+                return (
+                  <path
+                    key={flight.id}
+                    d={flight.projectedPath}
+                    stroke="#f59e0b"
+                    strokeWidth={1.5 / viewTransform.k}
+                    fill="none"
+                    opacity={0.95}
+                  />
+                );
+              }
+              if (isActive) {
+                const dimmed = !!(selectedFlightId || selectedAirportId) && !isSelected;
+                return (
+                  <path
+                    key={flight.id}
+                    d={flight.projectedPath}
+                    stroke="#ef4444"
+                    strokeWidth={0.8 / viewTransform.k}
+                    fill="none"
+                    opacity={dimmed ? 0.10 : 0.45}
+                  />
+                );
+              }
               return (
                 <path
                   key={flight.id}
                   d={flight.projectedPath}
-                  stroke={isActive ? '#ef4444' : '#94a3b8'}
-                  strokeWidth={isActive ? 1.6 / viewTransform.k : 0.5 / viewTransform.k}
+                  stroke="#94a3b8"
+                  strokeWidth={0.3 / viewTransform.k}
                   fill="none"
-                  strokeDasharray={isActive ? undefined : `${3 / viewTransform.k} ${5 / viewTransform.k}`}
-                  opacity={isActive ? 0.9 : 0.28}
+                  strokeDasharray={`${2 / viewTransform.k} ${6 / viewTransform.k}`}
+                  opacity={INACTIVE_OPACITY * 0.6}
                 />
               );
             })}
@@ -256,15 +294,22 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               const origin = hubIndex.get(plane.fromIcao);
               const dest   = hubIndex.get(plane.toIcao);
               if (!origin || !dest) return null;
+              const isHighlighted = plane.flightId === selectedFlightId;
               return (
                 <g
                   key={plane.key}
                   style={{ cursor: 'pointer' }}
+                  onClick={() => focusOnPlane(plane)}
                   onMouseEnter={(e) => {
                     const r = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTip({ plane, x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0) });
+                    setPlaneTooltip({ plane, screenX: e.clientX - (r?.left ?? 0), screenY: e.clientY - (r?.top ?? 0) });
                   }}
-                  onMouseLeave={() => setPlaneTip(null)}
+                  onMouseMove={(e) => {
+                    if (!planeTooltip) return;
+                    const r = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setPlaneTooltip(prev => prev ? { ...prev, screenX: e.clientX - (r?.left ?? 0), screenY: e.clientY - (r?.top ?? 0) } : null);
+                  }}
+                  onMouseLeave={() => setPlaneTooltip(null)}
                 >
                   <AnimatedPlane
                     x1={origin.projectedX!} y1={origin.projectedY!}
@@ -272,6 +317,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                     startedAt={plane.startedAt}
                     durationMs={plane.durationMs}
                     iconScale={1 / viewTransform.k}
+                    highlighted={isHighlighted}
                     capacity={plane.capacity}
                     occupied={plane.occupied}
                   />
@@ -284,18 +330,79 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           <g className="hubs">
             {projectedHubs.map(hub => {
               const x = hub.projectedX!, y = hub.projectedY!;
-              const { pct } = hubLoad(hub.id, hub.storageCapacity);
-              const r = 5 / viewTransform.k, rInner = 2 / viewTransform.k;
+              const opsAirport = airports.get(hub.id);
+              const load     = opsAirport?.load ?? hub.currentStorage;
+              const capacity = opsAirport?.capacity ?? hub.storageCapacity;
+              const pct = capacity > 0 ? (load / capacity) * 100 : 0;
+              const r = 5 / viewTransform.k;
               const hasActive = activeHubs.has(hub.id);
-              const fill = statusColor(pct);
+              const isSelected = selectedAirportId === hub.id ||
+                (selectedFlight ? hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao : false);
+              const isDimmed = !!(selectedFlightId || selectedAirportId) && !isSelected;
+              const isAirportSelected = selectedAirportId === hub.id;
+              const fill = isAirportSelected
+                ? '#6366f1'
+                : (selectedFlight && (hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao))
+                  ? '#f59e0b'
+                  : hubColor(pct, load === 0);
+
               return (
-                <g key={hub.id}>
+                <g
+                  key={hub.id}
+                  opacity={isDimmed ? 0.25 : 1}
+                  style={{ cursor: 'pointer' }}
+                  onMouseEnter={(e) => {
+                    const r2 = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setHubTooltip({ hub, screenX: e.clientX - (r2?.left ?? 0), screenY: e.clientY - (r2?.top ?? 0) });
+                  }}
+                  onMouseMove={(e) => {
+                    if (!hubTooltip) return;
+                    const r2 = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setHubTooltip(prev => prev ? { ...prev, screenX: e.clientX - (r2?.left ?? 0), screenY: e.clientY - (r2?.top ?? 0) } : null);
+                  }}
+                  onMouseLeave={() => setHubTooltip(null)}
+                  onClick={() => {
+                    focusOnAirport(hub.id);
+                    setSelectedFlightId(null);
+                    setInfoPanelOpen(true);
+                    setInfoPanelTab('airports');
+                  }}
+                >
+                  {/* Zona hover ampliada */}
+                  <circle cx={x} cy={y} r={r * 3} fill="transparent" />
+                  {/* Halo azul activo */}
                   {hasActive && (
-                    <circle cx={x} cy={y} r={r * 2.1} fill="rgba(16,185,129,0.16)" />
+                    <>
+                      <circle cx={x} cy={y} r={r * 2.4} fill="rgba(59,130,246,0.12)" />
+                      <circle cx={x} cy={y} r={r * 2.8}
+                        fill="none" stroke="#94a3b8"
+                        strokeWidth={1.2 / viewTransform.k}
+                        strokeDasharray={`${3.5 / viewTransform.k} ${2.5 / viewTransform.k}`} />
+                    </>
                   )}
-                  <circle cx={x} cy={y} r={r} fill={fill} filter="url(#ops-glow)"
-                    stroke="white" strokeWidth={1.5 / viewTransform.k} />
-                  <circle cx={x} cy={y} r={rInner} fill="white" />
+                  {/* Halo de selección */}
+                  {isSelected && (
+                    <circle cx={x} cy={y} r={r * 2.8}
+                      fill="none" stroke={isAirportSelected ? '#6366f1' : '#f59e0b'}
+                      strokeWidth={1.2 / viewTransform.k}
+                      strokeDasharray={`${3.5 / viewTransform.k} ${2.5 / viewTransform.k}`} />
+                  )}
+                  {/* Diamante — marcador de aeropuerto */}
+                  <rect
+                    x={x - r * 0.82} y={y - r * 0.82}
+                    width={r * 1.64} height={r * 1.64}
+                    rx={r * 0.28}
+                    fill={fill}
+                    stroke="white"
+                    strokeWidth={1.4 / viewTransform.k}
+                    transform={`rotate(45,${x},${y})`}
+                  />
+                  {/* Cruz de pistas */}
+                  <line x1={x - r * 0.42} y1={y} x2={x + r * 0.42} y2={y}
+                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
+                  <line x1={x} y1={y - r * 0.42} x2={x} y2={y + r * 0.42}
+                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
+                  {/* Etiqueta */}
                   <rect
                     x={x - 28 / viewTransform.k} y={y - 20 / viewTransform.k}
                     width={56 / viewTransform.k} height={12 / viewTransform.k}
@@ -317,212 +424,246 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         </g>
       </svg>
 
-      {/* ── Tooltip de avión ────────────────────────────────────────────────── */}
+      {/* ── TOOLTIP HUB ─────────────────────────────────────────────────────── */}
       <AnimatePresence>
-        {planeTip && (() => {
-          const p = planeTip.plane;
-          const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
-          const color = p.capacity === 0 ? '#2563eb' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
-          const flipX = planeTip.x > 700, flipY = planeTip.y > 400;
+        {hubTooltip && (() => {
+          const hub = hubTooltip.hub;
+          const opsAp = airports.get(hub.id);
+          const tooltipLoad = opsAp?.load ?? hub.currentStorage;
+          const tooltipCap  = opsAp?.capacity ?? hub.storageCapacity;
+          const pct = tooltipCap > 0 ? Math.round((tooltipLoad / tooltipCap) * 100) : 0;
+          const statusColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : tooltipLoad === 0 ? '#94a3b8' : '#10b981';
+          const statusLabel = pct >= 90 ? 'Crítico' : pct >= 70 ? 'En alerta' : tooltipLoad === 0 ? 'Vacío' : 'Óptimo';
+          const activeCount = planes.filter(p => p.fromIcao === hub.id || p.toIcao === hub.id).length;
+          const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
+          if (!containerRect) return null;
+          const relX = hubTooltip.screenX - containerRect.left;
+          const relY = hubTooltip.screenY - containerRect.top;
+          const flipX = relX > containerRect.width  * 0.7;
+          const flipY = relY > containerRect.height * 0.7;
           return (
-            <motion.div
-              key="ops-plane-tip"
+            <motion.div key="hub-tip"
               initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.92 }}
               transition={{ duration: 0.12 }}
               className="absolute z-50 pointer-events-none"
               style={{
-                left: flipX ? planeTip.x - 4 : planeTip.x + 14,
-                top:  flipY ? planeTip.y - 4 : planeTip.y + 14,
+                left: flipX ? relX - 4 : relX + 12,
+                top:  flipY ? relY - 4 : relY + 12,
                 transform: `${flipX ? 'translateX(-100%)' : ''} ${flipY ? 'translateY(-100%)' : ''}`,
               }}
             >
-              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[200px]">
+              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[190px]">
                 <div className="flex items-center gap-2 mb-2.5">
-                  <Plane className="w-4 h-4 shrink-0" style={{ color }} />
+                  <div className="w-3 h-3 rounded-full shrink-0" style={{ background: statusColor }} />
                   <div>
-                    <p className="text-[12px] font-black text-slate-900 leading-tight">{p.flightId}</p>
-                    <p className="text-[9px] font-bold text-slate-400 font-mono uppercase tracking-widest">En vuelo</p>
+                    <p className="text-[12px] font-black text-slate-900 leading-tight">{hub.city}</p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest font-mono">{hub.id}</p>
                   </div>
                 </div>
-                <div className="space-y-1 text-[10px]">
-                  <Row label="Origen"  value={p.fromIcao} mono />
-                  <Row label="Destino" value={p.toIcao} mono />
-                  <Row label="Carga"   value={p.capacity > 0 ? `${p.occupied}/${p.capacity} (${pct}%)` : '—'} mono />
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-slate-500 font-semibold">Almacenamiento</span>
+                    <span className="text-[10px] font-black text-slate-800 font-mono">{tooltipLoad.toLocaleString()} / {tooltipCap.toLocaleString()}</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: statusColor }} />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: statusColor }}>{statusLabel}</span>
+                    <span className="text-[9px] text-slate-400 font-mono">{pct}%</span>
+                  </div>
                 </div>
+                <div className="mt-2 pt-2 border-t border-slate-100 flex justify-between items-center">
+                  <span className="text-[10px] text-slate-500 font-semibold">Vuelos activos</span>
+                  <span className="text-[10px] font-black text-slate-800 font-mono">{activeCount}</span>
+                </div>
+                {hub.continent && (
+                  <div className="flex justify-between items-center mt-1">
+                    <span className="text-[10px] text-slate-500 font-semibold">Continente</span>
+                    <span className="text-[10px] font-bold text-slate-600">{hub.continent}</span>
+                  </div>
+                )}
               </div>
             </motion.div>
           );
         })()}
       </AnimatePresence>
 
-      {/* ── Controles de zoom ──────────────────────────────────────────────── */}
-      <div className="absolute bottom-5 left-5 z-20 flex flex-col gap-1.5">
-        <ZoomBtn onClick={() => zoomBy(1.5)} title="Acercar"><ZoomIn className="w-4 h-4" /></ZoomBtn>
-        <ZoomBtn onClick={() => zoomBy(1 / 1.5)} title="Alejar"><ZoomOut className="w-4 h-4" /></ZoomBtn>
-        <ZoomBtn onClick={resetZoom} title="Restablecer">⌂</ZoomBtn>
-      </div>
-
-      {/* ── Badge LIVE + reloj ─────────────────────────────────────────────── */}
-      <div className="absolute top-5 left-5 z-20 flex flex-col gap-2 items-start">
-        <div className="flex items-center gap-2 bg-white/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-200 shadow-xl">
-          <Radio className={cn('w-4 h-4', connected ? 'text-emerald-600' : 'text-slate-400')} />
-          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-900">
-            Operación Día a Día
-          </span>
-          <div className={cn('w-1.5 h-1.5 rounded-full ml-1', connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300')} />
-        </div>
-        <div className="flex items-center gap-2 bg-white/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-200 shadow">
-          <Clock className="w-3.5 h-3.5 text-blue-600" />
-          <div className="flex flex-col leading-none">
-            <span className="tabular-nums font-black text-slate-900 text-xs tracking-wide">{fmtDate(displayDate)}</span>
-            <span className="tabular-nums font-mono text-slate-500 text-[10px] mt-0.5">
-              {fmtTime(displayDate)} UTC
-              <span className="ml-1.5 text-indigo-400 font-bold">
-                {ops?.speedFactor && ops.speedFactor !== 1 ? `(x${ops.speedFactor})` : '(tiempo real)'}
-              </span>
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Paneles superior-derecha ───────────────────────────────────────── */}
-      <div className="absolute top-5 right-5 z-20 flex flex-col gap-3 items-end">
-        <CollapsiblePanel title="Operación en vivo" icon={<Activity className="w-4 h-4" />} defaultOpen>
-          <div className="pt-3 space-y-3">
-            <MetricRow icon={<Plane className="w-4 h-4 text-blue-500" />} label="Vuelos en aire" value={`${activeFlightCount}`} />
-            <MetricRow icon={<Package className="w-4 h-4 text-indigo-500" />} label="En almacén" value={`${totalLoad.load}`} />
-            <MetricRow icon={<CheckCircle2 className="w-4 h-4 text-emerald-500" />} label="Entregadas" value={`${metrics?.delivered ?? 0}`} />
-            <MetricRow icon={<Activity className="w-4 h-4 text-amber-500" />} label="Pendientes" value={`${metrics?.pending ?? totalLoad.pending}`} />
-            <MetricRow
-              icon={<AlertTriangle className="w-4 h-4 text-rose-500" />}
-              label="SLA vencidas" value={`${metrics?.slaBreaches ?? 0}`}
-              valueClass={(metrics?.slaBreaches ?? 0) > 0 ? 'text-rose-600' : 'text-emerald-600'}
-            />
-          </div>
-        </CollapsiblePanel>
-
-        <CollapsiblePanel title="Leyenda" icon={<MapIcon className="w-4 h-4" />}>
-          <div className="pt-3 space-y-2.5">
-            <LegendRow dot="bg-emerald-500" label="Hub óptimo" />
-            <LegendRow dot="bg-amber-500" label="Hub en alerta (>70%)" />
-            <LegendRow dot="bg-red-500" label="Hub crítico (>90%)" />
-            <div className="flex items-center gap-2.5">
-              <div className="w-6 h-0.5 bg-red-500" />
-              <span className="text-[10px] font-semibold text-slate-600">Ruta con vuelo activo</span>
-            </div>
-            <div className="flex items-center gap-2.5">
-              <Plane className="w-3.5 h-3.5 text-blue-600" />
-              <span className="text-[10px] font-semibold text-slate-600">Vuelo en curso (hoy)</span>
-            </div>
-          </div>
-        </CollapsiblePanel>
-
-        {events.length > 0 && (
-          <CollapsiblePanel title={`Eventos (${events.length})`} icon={<Activity className="w-4 h-4" />}>
-            <div className="pt-3 space-y-1.5 max-h-48 overflow-y-auto ops-scroll pr-1">
-              {events.slice(0, 20).map(ev => (
-                <div key={ev.id} className="text-[10px] text-slate-600 bg-slate-50 rounded-lg px-2 py-1.5 border border-slate-100">
-                  {ev.message}
+      {/* ── TOOLTIP AVIÓN ───────────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {planeTooltip && (() => {
+          const p = planeTooltip.plane;
+          const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
+          const loadColor = p.capacity === 0 ? '#2563eb' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+          const loadLabel = p.capacity === 0 ? 'Sin datos' : pct >= 90 ? 'Capacidad crítica' : pct >= 70 ? 'Casi lleno' : 'Normal';
+          const flipX = planeTooltip.screenX > 700;
+          const flipY = planeTooltip.screenY > 400;
+          return (
+            <motion.div key="plane-tip"
+              initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.92 }}
+              transition={{ duration: 0.12 }}
+              className="absolute z-50 pointer-events-none"
+              style={{
+                left: flipX ? planeTooltip.screenX - 4 : planeTooltip.screenX + 14,
+                top:  flipY ? planeTooltip.screenY - 4 : planeTooltip.screenY + 14,
+                transform: `${flipX ? 'translateX(-100%)' : ''} ${flipY ? 'translateY(-100%)' : ''}`,
+              }}
+            >
+              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[200px]">
+                <div className="flex items-center gap-2 mb-2.5">
+                  <div className="w-4 h-4 shrink-0" style={{ color: loadColor }}>✈</div>
+                  <div>
+                    <p className="text-[12px] font-black text-slate-900 leading-tight">{p.flightId}</p>
+                    <p className="text-[9px] font-bold text-slate-400 font-mono uppercase tracking-widest">En vuelo</p>
+                  </div>
                 </div>
-              ))}
-            </div>
-          </CollapsiblePanel>
-        )}
-      </div>
-
-      {/* ── Estado de hubs (inferior-izquierda) ────────────────────────────── */}
-      <div className="absolute bottom-5 left-20 z-20">
-        <CollapsiblePanel title="Estado de Hubs" icon={<BarChart3 className="w-4 h-4" />} className="max-w-[280px]">
-          <div className="pt-3 space-y-3 max-h-52 overflow-y-auto ops-scroll pr-1">
-            {projectedHubs.map(hub => {
-              const { load, capacity, pct } = hubLoad(hub.id, hub.storageCapacity);
-              const c = statusColor(pct);
-              return (
-                <div key={hub.id} className="space-y-1">
-                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider">
-                    <span className="text-slate-600">{hub.city}</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-400 font-mono">{load}/{capacity}</span>
-                      <span style={{ color: c }}>{Math.round(pct)}%</span>
+                <div className="space-y-1 text-[10px]">
+                  <div className="flex justify-between"><span className="text-slate-500 font-semibold">Origen</span><span className="font-black text-slate-800 font-mono">{p.fromIcao}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500 font-semibold">Destino</span><span className="font-black text-slate-800 font-mono">{p.toIcao}</span></div>
+                </div>
+                {p.capacity > 0 && (
+                  <div className="mt-2.5 pt-2 border-t border-slate-100 space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-slate-500 font-semibold">Carga</span>
+                      <span className="text-[10px] font-black text-slate-800 font-mono">{p.occupied.toLocaleString()} / {p.capacity.toLocaleString()}</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: loadColor }} />
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: loadColor }}>{loadLabel}</span>
+                      <span className="text-[9px] text-slate-400 font-mono">{pct}%</span>
                     </div>
                   </div>
-                  <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                    <motion.div animate={{ width: `${Math.min(100, pct)}%` }} className="h-full rounded-full" style={{ background: c }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </CollapsiblePanel>
+                )}
+              </div>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
+
+      {/* ── CONTROLES DE ZOOM (debajo de la barra superior del header) ──────── */}
+      <div className="absolute top-[72px] left-4 z-20 flex flex-col gap-1.5">
+        <button onClick={zoomIn} title="Acercar"
+          className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700">
+          <ZoomIn className="w-4 h-4" />
+        </button>
+        <button onClick={zoomOut} title="Alejar"
+          className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700">
+          <ZoomOut className="w-4 h-4" />
+        </button>
+        <button onClick={resetZoom} title="Restablecer zoom"
+          className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700 text-xs font-bold">
+          ⌂
+        </button>
       </div>
 
-      {/* ── Resumen de red (inferior-derecha) ──────────────────────────────── */}
-      <div className="absolute bottom-5 right-5 z-20">
-        <CollapsiblePanel title="Resumen de Red" icon={<Globe className="w-4 h-4" />}>
-          <div className="pt-3 space-y-2.5">
-            <SummaryRow label="Estado sesión" value={statusLabel} />
-            <SummaryRow label="Total hubs" value={`${projectedHubs.length}`} />
-            <SummaryRow label="Rutas activas" value={`${activeRoutePairs.size}`} valueClass="text-blue-600" />
-            <SummaryRow label="Vuelos en aire" value={`${activeFlightCount}`} />
-            <SummaryRow label="Bultos en almacén" value={`${totalLoad.load}`} />
-          </div>
-        </CollapsiblePanel>
+      {/* ── BOTÓN LEYENDA (inferior izquierda) ──────────────────────────────── */}
+      <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-start">
+        <AnimatePresence>
+          {legendOpen && (
+            <motion.div key="pop-legend"
+              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+              className="w-[240px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4"
+            >
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-700 mb-3">Leyenda</p>
+              <div className="space-y-2">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Aeropuertos ◆</p>
+                <LegendRow dot="bg-slate-400"   label="Almacén vacío" />
+                <LegendRow dot="bg-emerald-500" label="Almacén óptimo" />
+                <LegendRow dot="bg-amber-500"   label="En alerta (>70%)" />
+                <LegendRow dot="bg-red-500"     label="Punto crítico (>90%)" />
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
+                <LegendRow dot="bg-emerald-500" label="Carga normal" />
+                <LegendRow dot="bg-amber-500"   label="Casi lleno (>70%)" />
+                <LegendRow dot="bg-red-500"     label="Capacidad crítica" />
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-6 h-px bg-red-400 rounded" />
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta activa</span>
+                </div>
+                <div className="flex items-center gap-2.5">
+                  <div className="flex gap-0.5">{[0,1,2].map(i => <div key={i} className="w-1.5 h-px bg-slate-400" />)}</div>
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
+                </div>
+                <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400">
+                  Rueda del ratón para zoom · Arrastrar para desplazar
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <button
+          onClick={() => setLegendOpen(v => !v)}
+          className={cn(
+            'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg',
+            legendOpen ? 'bg-slate-800 text-white' : 'bg-white/90 backdrop-blur-md text-slate-600 border border-slate-200 hover:bg-slate-50'
+          )}
+        >
+          <MapIcon className="w-4 h-4" /> Leyenda
+        </button>
       </div>
+
+      {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos ─────────────── */}
+      <AnimatePresence>
+        {infoPanelOpen && (
+          <motion.div
+            key="ops-info-panel"
+            initial={{ x: 40, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 40, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+            className="absolute top-4 right-4 bottom-4 z-30 w-[46%] min-w-[400px] max-w-[640px] flex flex-col"
+          >
+            <button
+              onClick={() => setInfoPanelOpen(false)}
+              className="absolute -left-3 top-1/2 -translate-y-1/2 z-10 w-7 h-12 bg-white rounded-l-xl border border-slate-200 shadow-lg flex items-center justify-center text-slate-500 hover:text-indigo-600 hover:bg-slate-50 transition-colors"
+              title="Ocultar paneles"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+            <SimulationInfoPanel
+              sessionId={null}
+              hasSession={true}
+              airports={opsAirportList}
+              flights={opsFlightList}
+              shipments={[]}
+              selectedAirportId={selectedAirportId}
+              selectedFlightId={selectedFlightId}
+              onSelectAirport={(icao) => {
+                focusOnAirport(icao);
+                setSelectedFlightId(null);
+              }}
+              onSelectFlight={(sf) => {
+                const plane = planes.find(p => p.flightId === sf.flightId);
+                if (plane) focusOnPlane(plane);
+              }}
+              activeTab={infoPanelTab}
+              onTabChange={setInfoPanelTab}
+              activeFlightIds={activeFlightIds}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Botón para reabrir el panel */}
+      {!infoPanelOpen && (
+        <button
+          onClick={() => setInfoPanelOpen(true)}
+          className="absolute top-1/2 right-0 -translate-y-1/2 z-30 px-2 py-3 bg-white rounded-l-xl border border-slate-200 shadow-lg flex flex-col items-center gap-1.5 text-slate-600 hover:text-indigo-600 hover:bg-slate-50 transition-colors"
+          title="Mostrar paneles"
+        >
+          <ChevronLeft className="w-4 h-4" />
+          <LayoutGrid className="w-4 h-4" />
+        </button>
+      )}
 
       <style>{`
-        .ops-scroll::-webkit-scrollbar { width: 3px; }
-        .ops-scroll::-webkit-scrollbar-track { background: transparent; }
-        .ops-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
       `}</style>
     </div>
   );
 });
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-function ZoomBtn({ onClick, title, children }: { onClick: () => void; title: string; children: React.ReactNode }) {
-  return (
-    <button onClick={onClick} title={title}
-      className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700 text-xs font-bold">
-      {children}
-    </button>
-  );
-}
-
-function MetricRow({ icon, label, value, valueClass }: { icon: React.ReactNode; label: string; value: string; valueClass?: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex items-center gap-2">
-        {icon}
-        <span className="text-[10px] font-semibold text-slate-600">{label}</span>
-      </div>
-      <span className={cn('text-[11px] font-black tabular-nums', valueClass || 'text-slate-900')}>{value}</span>
-    </div>
-  );
-}
-
-function LegendRow({ dot, label }: { dot: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2.5">
-      <div className={cn('w-3 h-3 rounded-full shrink-0', dot)} />
-      <span className="text-[10px] font-semibold text-slate-600">{label}</span>
-    </div>
-  );
-}
-
-function SummaryRow({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
-  return (
-    <div className="flex items-center justify-between gap-6">
-      <span className="text-[10px] text-slate-500 font-semibold capitalize">{label}</span>
-      <span className={cn('text-[11px] font-black', valueClass || 'text-slate-900')}>{value}</span>
-    </div>
-  );
-}
-
-function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-slate-500 font-semibold">{label}</span>
-      <span className={cn('font-black text-slate-800', mono && 'font-mono')}>{value}</span>
-    </div>
-  );
-}

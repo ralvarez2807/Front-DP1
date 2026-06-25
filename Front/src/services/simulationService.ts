@@ -66,6 +66,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
     status: (data.status as string)?.toLowerCase() as SimulationSession['status'],
     startTimeAt: data.simStart || new Date().toISOString(),
     currentTimeAt,
+    speedFactor: data.speedFactor ?? SPEED_FACTOR,
     config,
     metrics: {
       activeBaggageCount: 0,
@@ -170,6 +171,23 @@ export const simulationService = {
   getSimShipments: async (id: string, signal?: AbortSignal): Promise<SimShipment[]> => {
     const response = await api.get(`/simulations/${id}/shipments`, { signal });
     return response.data;
+  },
+
+  // Detalle de un envío: maletas individuales con estado, posición y tramos.
+  // Usado para localizar el vuelo que transporta un envío "En ruta".
+  getShipmentDetail: async (id: string, shipmentId: string, signal?: AbortSignal): Promise<{
+    fromIcao: string | null;
+    toIcao: string | null;
+  }> => {
+    const response = await api.get(`/simulations/${id}/shipments/${shipmentId}`, { signal });
+    const baggages: any[] = response.data?.baggages ?? [];
+    // Buscar una maleta IN_FLIGHT con un tramo en estado DEPARTED
+    for (const b of baggages) {
+      if (b.status !== 'IN_FLIGHT') continue;
+      const activeLeg = (b.route ?? []).find((leg: any) => leg.state === 'DEPARTED');
+      if (activeLeg) return { fromIcao: activeLeg.fromIcao, toIcao: activeLeg.toIcao };
+    }
+    return { fromIcao: null, toIcao: null };
   },
 
   // Maletas físicamente en un aeropuerto ahora (en espera de conexión).

@@ -21,33 +21,15 @@ const MapContext = createContext<MapContextType | null>(null);
 const MAP_WIDTH  = 1200;
 const MAP_HEIGHT = 800;
 
-// Margen (en unidades del viewBox) alrededor de los aeropuertos extremos.
-const FIT_PADDING = 60;
-
 /**
- * Proyección Mercator encuadrada en la región operativa.
- *
- * Si hay aeropuertos cargados, `fitExtent` escala y centra el mapa para que el
- * lienzo (MAP_WIDTH×MAP_HEIGHT) contenga EXACTAMENTE el bounding box de los
- * aeropuertos (= los extremos de los vuelos). Así, zonas sin operación (EE.UU.,
- * Rusia, Australia…) quedan fuera del lienzo: no se ven ni se puede arrastrar
- * hasta ellas. Sin aeropuertos aún, cae a una vista mundial mientras carga.
+ * Proyección Mercator mundial estándar.
+ * El auto-fit de zoom/pan (en SimulationDashboardView) se encarga de centrar
+ * la vista sobre los aeropuertos operativos sin recortar el océano.
  */
-function buildProjection(hubs: Hub[]) {
-  const projection = d3.geoMercator();
-  if (hubs.length >= 2) {
-    const points = {
-      type: 'MultiPoint' as const,
-      coordinates: hubs.map(h => [h.lng, h.lat]),
-    };
-    projection.fitExtent(
-      [[FIT_PADDING, FIT_PADDING], [MAP_WIDTH - FIT_PADDING, MAP_HEIGHT - FIT_PADDING]],
-      points as any,
-    );
-  } else {
-    projection.scale(185).translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
-  }
-  return projection;
+function buildProjection(_hubs: Hub[]) {
+  return d3.geoMercator()
+    .scale(185)
+    .translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
 }
 
 // Bezier cuadrático — control point simétrico para que A→B y B→A

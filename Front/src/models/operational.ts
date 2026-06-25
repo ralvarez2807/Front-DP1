@@ -66,6 +66,7 @@ export interface SimulationSession {
   startTimeAt: string;
   currentTimeAt: number; // operational time
   lastProcessedSequence?: number; // For synchronization
+  speedFactor: number; // sim-hours per real-hour, leído del backend
   config: {
     speed: number;
     scenario: SimulationScenario;

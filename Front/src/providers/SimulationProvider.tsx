@@ -132,7 +132,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           .then(snapshot => {
             setSession(simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config));
             const inFlight = (snapshot.flights ?? [])
-              .filter((f: any) => f.status === 'IN_FLIGHT')
+              .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
               .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
             if (inFlight.length > 0) setRestoredFlights(inFlight);
             socketService.connect(mine.id);
@@ -208,7 +208,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         const restored = simulationService.mapSessionPublic({ ...raw, id: sessionId }, config);
         setSession(prev => prev ? { ...restored, config: prev.config } : null);
         const inFlight = (raw.flights ?? [])
-          .filter((f: any) => f.status === 'IN_FLIGHT')
+          .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
           .map((f: any) => ({ ...f, simTime: raw.simTime }));
         if (inFlight.length > 0) setRestoredFlights(inFlight);
       } catch (e) {
@@ -286,7 +286,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           const snapshot = await simulationService.getSnapshotRaw(mine.id, controller.signal);
           newSession = simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config);
           const inFlight = (snapshot.flights ?? [])
-            .filter((f: any) => f.status === 'IN_FLIGHT')
+            .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
             .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
           if (inFlight.length > 0) setRestoredFlights(inFlight);
           addToast('Sesión existente recuperada', 'info');

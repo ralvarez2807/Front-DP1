@@ -16,10 +16,8 @@ import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 
-// speedFactor del backend: 80 sim-horas por hora real (5 días en ~90 min reales).
-// La animación visual usa el mismo factor para que el avión aterrice exactamente
-// cuando el backend envía FLIGHT_ARRIVED.
-const SIM_SPEED = 80;
+// Fallback de velocidad si el backend aún no respondió con su speedFactor real.
+const SIM_SPEED_FALLBACK = 80;
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
@@ -169,8 +167,13 @@ function AnimatedPlane({
 }
 
 // ── Vista principal ────────────────────────────────────────────────────────
-export const SimulationDashboardView: React.FC = () => {
-  const { session, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
+interface SimulationDashboardViewProps {
+  showConfig: boolean;
+  onConfigClose: () => void;
+}
+
+export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose }) => {
+  const { session, lastSimUpdate, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
 
@@ -179,10 +182,10 @@ export const SimulationDashboardView: React.FC = () => {
   // Listas en vivo para el panel de información (vuelos y paquetes/envíos)
   const [simFlightList, setSimFlightList] = useState<SimFlight[]>([]);
   const [simShipmentList, setSimShipmentList] = useState<SimShipment[]>([]);
-  // Panel lateral derecho abierto/colapsado
-  const [infoPanelOpen, setInfoPanelOpen] = useState(true);
-  // Popover abierto en la barra inferior (control/leyenda/config)
-  const [bottomPopover, setBottomPopover] = useState<'legend' | 'config' | null>(null);
+  // Panel lateral derecho — cerrado por defecto
+  const [infoPanelOpen, setInfoPanelOpen] = useState(false);
+  // Popover de leyenda flotante en el mapa
+  const [legendOpen, setLegendOpen] = useState(false);
   const simHubLoads = useMemo(() => {
     const m = new Map<string, { load: number; capacity: number }>();
     simAirportList.forEach(a => m.set(a.icao, { load: a.load, capacity: a.capacity }));
@@ -226,9 +229,19 @@ export const SimulationDashboardView: React.FC = () => {
     return () => { cancelled = true; clearInterval(id); };
   }, [session?.id]);
 
-  // ── Cache de duraciones reales de vuelo (flightId → durationMs real) ──────
-  // Poblado desde el API para que cada vuelo tenga su propia velocidad visual.
+  // ── Cache de duraciones y depTimes reales de vuelo ──────────────────────────
+  // Poblado desde el API para que cada vuelo tenga su propia velocidad visual y
+  // para validar eventos WS que lleguen antes de la hora de salida programada.
   const flightDurationsRef = useRef<Map<string, number>>(new Map());
+  const flightDepMsRef     = useRef<Map<string, number>>(new Map());
+
+  // speedFactor real leído del backend (sim-horas por hora real).
+  // Se mantiene en ref para que los callbacks del WS siempre lean el valor actual
+  // sin necesidad de estar en sus listas de dependencias.
+  const simSpeedRef = useRef<number>(SIM_SPEED_FALLBACK);
+  useEffect(() => {
+    if (session?.speedFactor) simSpeedRef.current = session.speedFactor;
+  }, [session?.speedFactor]);
 
   // ── Carga real de vuelos (polling) ──────────────────────────────────────
   const fetchFlightLoadsRef = useRef<(() => Promise<void>) | null>(null);
@@ -245,12 +258,14 @@ export const SimulationDashboardView: React.FC = () => {
         console.debug('[SimMap] /flights sample:', flights.slice(0, 3).map(f => ({
           id: f.flightId, status: f.status, load: f.load, cap: f.capacity, dep: f.depTime, arr: f.arrTime,
         })));
-        // Actualizar cache de duraciones reales
+        // Actualizar cache de duraciones y depTimes reales
         flights.forEach(f => {
           if (f.depTime && f.arrTime) {
-            const simMs = new Date(f.arrTime).getTime() - new Date(f.depTime).getTime();
-            const realMs = Math.max(15_000, Math.round(simMs / SIM_SPEED));
+            const depMs = new Date(f.depTime).getTime();
+            const simMs = new Date(f.arrTime).getTime() - depMs;
+            const realMs = Math.max(15_000, Math.round(simMs / simSpeedRef.current));
             flightDurationsRef.current.set(f.flightId, realMs);
+            if (depMs) flightDepMsRef.current.set(f.flightId, depMs);
           }
         });
         // Actualizar carga en aviones activos
@@ -343,7 +358,7 @@ export const SimulationDashboardView: React.FC = () => {
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
-    setBottomPopover(null);
+    setLegendOpen(false);
     isPanning.current = true;
     panStart.current = {
       x: e.clientX,
@@ -397,10 +412,15 @@ export const SimulationDashboardView: React.FC = () => {
 
   // ── Aviones en vuelo ─────────────────────────────────────────────────────
   const [activePlanes, setActivePlanes] = useState<ActivePlane[]>([]);
+  // shipmentIds con al menos una maleta actualmente en el aire (por eventos BAGGAGE_DEPARTED/DELIVERED)
+  const [shipmentsInFlight, setShipmentsInFlight] = useState<Set<string>>(new Set());
+  // Ref sincronizada para leer en RAF sin closures obsoletos
+  const activePlanesRef = useRef<ActivePlane[]>([]);
+  useEffect(() => { activePlanesRef.current = activePlanes; }, [activePlanes]);
   const [seenFlights, setSeenFlights] = useState<SeenFlight[]>([]);
 
   useEffect(() => {
-    const unsubDep = socket.on('FLIGHT_DEPARTED', ({ payload }: { payload: any }) => {
+    const unsubDep = socket.on('FLIGHT_DEPARTED', ({ simTime, payload }: { simTime?: string; payload: any }) => {
       // Intentar múltiples nombres de campo que el backend podría usar
       const fromIcao = payload?.fromIcao ?? payload?.originIcao ?? payload?.origin ?? payload?.from;
       const toIcao   = payload?.toIcao   ?? payload?.destIcao   ?? payload?.destination ?? payload?.dest ?? payload?.to;
@@ -411,6 +431,18 @@ export const SimulationDashboardView: React.FC = () => {
       }
 
       const fid = payload.flightId ?? payload.id ?? `${fromIcao}-${toIcao}`;
+
+      // Validar que el evento no llega antes que la hora de salida programada.
+      // El backend puede emitir FLIGHT_DEPARTED con un simTime anterior al depTime real
+      // (bug de inicialización). Ignorar el evento en ese caso; el WS lo reenviará
+      // cuando el tiempo simulado llegue realmente al depTime.
+      const wsSimMs    = simTime ? new Date(simTime).getTime() : null;
+      const cachedDepMs = flightDepMsRef.current.get(fid);
+      if (wsSimMs && cachedDepMs && wsSimMs < cachedDepMs - 60_000) {
+        console.warn(`[SimMap] FLIGHT_DEPARTED ignorado: simTime (${simTime}) es anterior al depTime programado del vuelo ${fid}`);
+        return;
+      }
+
       const key = `${fid}-${fromIcao}-${toIcao}`;
 
       // Duración real: usar cache de depTime/arrTime del API si está disponible.
@@ -419,7 +451,7 @@ export const SimulationDashboardView: React.FC = () => {
       const cachedDuration = flightDurationsRef.current.get(fid);
       const fallbackSimHours = payload.durationHours ?? payload.duration ?? 2;
       const durationMs = cachedDuration
-        ?? Math.max(15_000, Math.round(fallbackSimHours * 3_600_000 / SIM_SPEED));
+        ?? Math.max(15_000, Math.round(fallbackSimHours * 3_600_000 / simSpeedRef.current));
 
       console.debug(`[SimMap] FLIGHT_DEPARTED: ${fromIcao}→${toIcao} | cached=${!!cachedDuration} durationMs=${durationMs}`);
 
@@ -504,7 +536,41 @@ export const SimulationDashboardView: React.FC = () => {
       );
     });
 
-    return () => { unsubDep(); unsubArr(); };
+    // BAGGAGE_DEPARTED / BAGGAGE_ARRIVED: rastrear qué envíos tienen maletas en el aire.
+    // El baggageId sigue el formato "{shipmentId}-B{n}" → derivamos shipmentId quitando el sufijo.
+    const shipmentIdOf = (baggageId: string) => baggageId.replace(/-B\d+$/, '');
+
+    const unsubBagDep = socket.on('BAGGAGE_DEPARTED', ({ payload }: { payload: any }) => {
+      const bid = payload?.baggageId;
+      if (!bid) return;
+      setShipmentsInFlight(prev => {
+        const next = new Set(prev);
+        next.add(shipmentIdOf(bid));
+        return next;
+      });
+    });
+
+    const unsubBagArr = socket.on('BAGGAGE_ARRIVED', ({ payload }: { payload: any }) => {
+      const bid = payload?.baggageId;
+      if (!bid) return;
+      // No quitamos el shipmentId aquí: puede haber otras maletas del mismo envío aún en vuelo.
+      // Se limpiará al recibir BAGGAGE_DELIVERED o en el siguiente polling.
+    });
+
+    const unsubBagDel = socket.on('BAGGAGE_DELIVERED', ({ payload }: { payload: any }) => {
+      const bid = payload?.baggageId;
+      if (!bid) return;
+      const sid = shipmentIdOf(bid);
+      // Solo eliminar si no queda ninguna otra maleta del envío en vuelo
+      // (la lógica exacta la maneja el polling; aquí solo marcamos que al menos una llegó)
+      setShipmentsInFlight(prev => {
+        const next = new Set(prev);
+        next.delete(sid);
+        return next;
+      });
+    });
+
+    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); };
   }, [socket]);
 
   // ── Restaurar aviones IN_FLIGHT desde snapshot (nueva pestaña / resync) ──
@@ -519,10 +585,15 @@ export const SimulationDashboardView: React.FC = () => {
       const arrMs  = new Date(f.arrTime).getTime();
       const simNow = new Date(f.simTime).getTime();
 
+      // El backend puede incluir en el snapshot vuelos con status DEPARTED cuya depTime
+      // aún no ha llegado en tiempo simulado (bug de inicialización). Ignorarlos: si el
+      // vuelo no ha salido en sim-time no debe aparecer en el mapa.
+      if (!depMs || !simNow || depMs > simNow) return;
+
       const simFlightMs  = arrMs - depMs;
-      const durationMs   = Math.max(30_000, Math.round(simFlightMs / SIM_SPEED));
+      const durationMs   = Math.max(30_000, Math.round(simFlightMs / simSpeedRef.current));
       const simElapsedMs = Math.max(0, simNow - depMs);
-      const startedAt    = Date.now() - Math.round(simElapsedMs / SIM_SPEED);
+      const startedAt    = Date.now() - Math.round(simElapsedMs / simSpeedRef.current);
 
       const key = `${f.flightId}-${f.fromIcao}-${f.toIcao}`;
 
@@ -609,39 +680,15 @@ export const SimulationDashboardView: React.FC = () => {
       return;
     }
     await createSession(selectedScenario, startDate, startTime);
-  }, [selectedScenario, startDate, startTime, createSession]);
+    onConfigClose();
+  }, [selectedScenario, startDate, startTime, createSession, onConfigClose]);
 
   const confirmCollapse = useCallback(async () => {
     setShowCollapseWarning(false);
+    onConfigClose();
     await createSession(SCENARIOS.COLLAPSE, startDate, startTime);
-  }, [createSession, startDate, startTime]);
+  }, [createSession, startDate, startTime, onConfigClose]);
 
-  // ── Tiempo real transcurrido (cronómetro fluido) ─────────────────────────
-  const [elapsedRealMs, setElapsedRealMs] = useState(0);
-  useEffect(() => {
-    if (!sessionStartedAt || !session?.id) { setElapsedRealMs(0); return; }
-    // Dependency en session.id solamente para evitar que cada evento WS reinicie el intervalo
-    const startedAt = sessionStartedAt;
-    const id = setInterval(() => setElapsedRealMs(Date.now() - startedAt), 1000);
-    return () => clearInterval(id);
-  }, [sessionStartedAt, session?.id]);
-
-  const formatRealElapsed = (ms: number) => {
-    const totalSec = Math.floor(ms / 1000);
-    const h = Math.floor(totalSec / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-    if (h > 0) return `${h}h ${m.toString().padStart(2,'0')}m ${s.toString().padStart(2,'0')}s`;
-    return `${m}m ${s.toString().padStart(2,'0')}s`;
-  };
-
-  // ── Formato tiempo simulado legible ──────────────────────────────────────
-  const formatSimElapsed = (totalHours: number) => {
-    const d = Math.floor(totalHours / 24);
-    const h = totalHours % 24;
-    if (d > 0) return `${d}d ${h}h`;
-    return `${h}h`;
-  };
 
   // ── Auto-fit: centra el mapa en los aeropuertos cargados ─────────────────
   const autoFitDoneRef = useRef(false);
@@ -665,6 +712,9 @@ export const SimulationDashboardView: React.FC = () => {
     ));
   }, [projectedHubs, clamp]);
 
+  // ── Pestaña activa del panel lateral ────────────────────────────────────
+  const [infoPanelTab, setInfoPanelTab] = useState<'airports' | 'flights' | 'packages'>('airports');
+
   // ── Aeropuerto seleccionado ──────────────────────────────────────────────
   const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
 
@@ -681,37 +731,85 @@ export const SimulationDashboardView: React.FC = () => {
   // ── Vuelo seleccionado en el mapa ────────────────────────────────────────
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
 
-  // Al seleccionar un vuelo, hacer auto-pan/zoom para centrarlo en el mapa
+  // Calcula la posición Bézier actual del avión (misma curva que AnimatedPlane)
+  const getPlanePosition = useCallback((plane: ActivePlane, origin: typeof projectedHubs[0], dest: typeof projectedHubs[0]) => {
+    const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+    const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+    const bcx = (origin.projectedX! + dest.projectedX!) / 2;
+    const bcy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
+    const mt = 1 - t;
+    return {
+      x: mt*mt*origin.projectedX! + 2*mt*t*bcx + t*t*dest.projectedX!,
+      y: mt*mt*origin.projectedY! + 2*mt*t*bcy + t*t*dest.projectedY!,
+      dist,
+    };
+  }, [projectedHubs]);
+
+  // Al seleccionar un vuelo, hacer zoom instantáneo al avión (o al midpoint si aterrizó)
   const focusOnFlight = useCallback((sf: SeenFlight) => {
-    setSelectedFlightId(prev => prev === sf.flightId ? null : sf.flightId);
+    const newId = sf.flightId === selectedFlightId ? null : sf.flightId;
+    setSelectedFlightId(newId);
     setSelectedAirportId(null);
+    if (!newId) return;
     const origin = projectedHubs.find(h => h.id === sf.fromIcao);
     const dest   = projectedHubs.find(h => h.id === sf.toIcao);
     if (!origin || !dest) return;
-    const cx = (origin.projectedX! + dest.projectedX!) / 2;
-    const cy = (origin.projectedY! + dest.projectedY!) / 2;
     const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
-    const targetK = Math.max(2, Math.min(8, MAP_VIEWBOX.width / (dist * 1.6)));
+    const targetK = Math.max(3, Math.min(8, MAP_VIEWBOX.width / (dist * 1.2)));
     const W = MAP_VIEWBOX.width;
     const H = MAP_VIEWBOX.height;
-    setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
-  }, [projectedHubs, clamp, setSelectedAirportId]);
+    // Saltar al avión si está en vuelo, sino al midpoint
+    const plane = activePlanes.find(p => p.flightId === sf.flightId);
+    let fx: number, fy: number;
+    if (plane && sf.isActive) {
+      const pos = getPlanePosition(plane, origin, dest);
+      fx = pos.x; fy = pos.y;
+    } else {
+      fx = (origin.projectedX! + dest.projectedX!) / 2;
+      fy = (origin.projectedY! + dest.projectedY!) / 2;
+    }
+    setViewTransform(clamp(W / 2 - fx * targetK, H / 2 - fy * targetK, targetK));
+  }, [projectedHubs, clamp, selectedFlightId, activePlanes, getPlanePosition]);
 
-  // Enfocar un vuelo desde el panel de información (datos del API), centrando la cámara
+  // Enfocar un vuelo desde el panel de información (datos del API).
+  // Para vuelos DEPARTED: resuelve primero contra activePlanes (fuente de verdad del WS actual)
+  // para obtener el flightId exacto y las ICAO correctas, evitando mezclar instancias del mismo
+  // horario de días distintos.
+  // Para vuelos SCHEDULED/ARRIVED: crea un SeenFlight sintético con datos del API.
   const focusOnSimFlight = useCallback((f: SimFlight) => {
-    setSelectedAirportId(null);
-    setSelectedFlightId(prev => prev === f.flightId ? null : f.flightId);
-    const origin = projectedHubs.find(h => h.id === f.fromIcao);
-    const dest   = projectedHubs.find(h => h.id === f.toIcao);
-    if (!origin || !dest) return;
-    const cx = (origin.projectedX! + dest.projectedX!) / 2;
-    const cy = (origin.projectedY! + dest.projectedY!) / 2;
-    const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
-    const targetK = Math.max(2, Math.min(8, MAP_VIEWBOX.width / (dist * 1.6)));
-    const W = MAP_VIEWBOX.width;
-    const H = MAP_VIEWBOX.height;
-    setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
-  }, [projectedHubs, clamp]);
+    // 1. Buscar el avión activo en el mapa: solo por flightId exacto o scheduleId.
+    // NO usar la ruta (fromIcao/toIcao) como fallback: si hay dos vuelos en la misma
+    // ruta, cogería el primero que encuentre en activePlanes en lugar del vuelo correcto.
+    const matchingPlane = activePlanes.find(p =>
+      p.flightId === f.flightId ||
+      scheduleIdOf(p.flightId) === scheduleIdOf(f.flightId)
+    );
+
+    // ID real del WS si hay avión en vuelo, sino el del API
+    const resolvedId = matchingPlane?.flightId ?? f.flightId;
+
+    // 2. Buscar SeenFlight con el ID resuelto (no por scheduleId, para no coger instancias antiguas)
+    const existing = seenFlights.find(sf => sf.flightId === resolvedId);
+
+    if (existing) {
+      focusOnFlight(existing);
+      return;
+    }
+
+    // 3. Sin SeenFlight: construir uno con el ID y las ICAO correctas.
+    // isActive solo es true si el WS tiene un avión activo para este vuelo.
+    // Si no hay avión en el mapa, el vuelo no puede seguirse aunque el API diga DEPARTED.
+    const synthetic: SeenFlight = {
+      flightId: resolvedId,
+      scheduleId: scheduleIdOf(resolvedId),
+      fromIcao: matchingPlane?.fromIcao ?? f.fromIcao,
+      toIcao:   matchingPlane?.toIcao   ?? f.toIcao,
+      seenAt: Date.now(),
+      isActive: !!matchingPlane,
+    };
+    setSeenFlights(prev => mergeSeenFlights(prev, synthetic, resolvedId));
+    focusOnFlight(synthetic);
+  }, [seenFlights, focusOnFlight, activePlanes]);
 
   // Enfocar un aeropuerto desde el panel y deseleccionar vuelo
   const handleSelectAirportFromPanel = useCallback((icao: string) => {
@@ -719,42 +817,74 @@ export const SimulationDashboardView: React.FC = () => {
     setSelectedFlightId(null);
   }, [focusOnAirport]);
 
-  // ── Cámara sigue al avión seleccionado ──────────────────────────────────
-  const followIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Enfocar un envío "En ruta": consulta el tramo activo del envío y navega al avión
+  const focusOnShipment = useCallback(async (s: SimShipment) => {
+    if (!session?.id) return;
+    try {
+      const { fromIcao, toIcao } = await simulationService.getShipmentDetail(session.id, s.shipmentId);
+      if (!fromIcao || !toIcao) return;
+
+      // Buscar el avión en activePlanes que esté en ese tramo
+      const plane = activePlanes.find(p => p.fromIcao === fromIcao && p.toIcao === toIcao);
+      if (!plane) return;
+
+      const sf = seenFlights.find(f => f.flightId === plane.flightId);
+      if (sf) {
+        setInfoPanelTab('flights');
+        focusOnFlight(sf);
+      }
+    } catch { /* silencioso */ }
+  }, [session?.id, activePlanes, seenFlights, focusOnFlight]);
+
+  // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
+  const selectedFlightIdRef = useRef<string | null>(null);
+  useEffect(() => { selectedFlightIdRef.current = selectedFlightId; }, [selectedFlightId]);
+  const projectedHubsRef = useRef(projectedHubs);
+  useEffect(() => { projectedHubsRef.current = projectedHubs; }, [projectedHubs]);
+
   useEffect(() => {
-    if (followIntervalRef.current) clearInterval(followIntervalRef.current);
     if (!selectedFlightId) return;
+    let rafId: number;
 
     const follow = () => {
-      setActivePlanes(planes => {
-        const plane = planes.find(p => p.flightId === selectedFlightId);
-        if (!plane) return planes;
-        const origin = projectedHubs.find(h => h.id === plane.fromIcao);
-        const dest   = projectedHubs.find(h => h.id === plane.toIcao);
-        if (!origin || !dest) return planes;
-        const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
-        const px = origin.projectedX! + (dest.projectedX! - origin.projectedX!) * t;
-        const py = origin.projectedY! + (dest.projectedY! - origin.projectedY!) * t;
-        const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
-        const targetK = Math.max(3, Math.min(8, MAP_VIEWBOX.width / (dist * 1.2)));
+      const fid = selectedFlightIdRef.current;
+      if (!fid) return;
+      const plane = activePlanesRef.current.find(p => p.flightId === fid);
+      if (!plane) { rafId = requestAnimationFrame(follow); return; }
+      const origin = projectedHubsRef.current.find(h => h.id === plane.fromIcao);
+      const dest   = projectedHubsRef.current.find(h => h.id === plane.toIcao);
+      if (!origin || !dest) { rafId = requestAnimationFrame(follow); return; }
+
+      // Misma curva de Bézier que AnimatedPlane
+      const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+      const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+      const cx = (origin.projectedX! + dest.projectedX!) / 2;
+      const cy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
+      const mt = 1 - t;
+      const px = mt*mt*origin.projectedX! + 2*mt*t*cx + t*t*dest.projectedX!;
+      const py = mt*mt*origin.projectedY! + 2*mt*t*cy + t*t*dest.projectedY!;
+
+      // targetX/Y se calculan dentro del callback con prev.k para que sean correctos
+      // independientemente del zoom actual. Si se usara un targetK fijo calculado afuera,
+      // la cámara no centraría bien cuando prev.k difiere de ese targetK.
+      setViewTransform(prev => {
         const W = MAP_VIEWBOX.width;
         const H = MAP_VIEWBOX.height;
-        setViewTransform(prev => {
-          const newX = W / 2 - px * targetK;
-          const newY = H / 2 - py * targetK;
-          // suavizado: interpola 15% hacia la posición objetivo
-          const smoothX = prev.x + (newX - prev.x) * 0.15;
-          const smoothY = prev.y + (newY - prev.y) * 0.15;
-          return { x: Math.max(W * (1 - targetK), Math.min(0, smoothX)), y: Math.max(H * (1 - targetK), Math.min(0, smoothY)), k: targetK };
-        });
-        return planes;
+        const txAtK = W / 2 - px * prev.k;
+        const tyAtK = H / 2 - py * prev.k;
+        const sf = 0.06;
+        const nx = prev.x + (txAtK - prev.x) * sf;
+        const ny = prev.y + (tyAtK - prev.y) * sf;
+        return clamp(nx, ny, prev.k);
       });
+
+      rafId = requestAnimationFrame(follow);
     };
 
-    followIntervalRef.current = setInterval(follow, 500);
-    return () => { if (followIntervalRef.current) clearInterval(followIntervalRef.current); };
+    rafId = requestAnimationFrame(follow);
+    return () => cancelAnimationFrame(rafId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedFlightId, projectedHubs]);
+  }, [selectedFlightId, clamp]);
 
   // ── Rutas e hubs con vuelo activo ────────────────────────────────────────
   const hubIndex = useMemo(() => new Map(projectedHubs.map(h => [h.id, h])), [projectedHubs]);
@@ -768,12 +898,23 @@ export const SimulationDashboardView: React.FC = () => {
     selectedFlightId ? seenFlights.find(f => f.flightId === selectedFlightId) ?? null : null
   , [selectedFlightId, seenFlights]);
 
+  // La ruta seleccionada es sólida únicamente si hay un avión real en el mapa.
+  // El API puede decir "En vuelo" pero sin avión en activePlanes (WS no lo confirmó)
+  // la ruta debe pintarse punteada — no hay nada que seguir.
+  const selectedFlightIsActive = !!selectedPlane;
+
   // Clave por par origen-destino para evitar desfases por ID de vuelo
   const activeRoutePairSet = useMemo(() => {
     const s = new Set<string>();
     activePlanes.forEach(p => s.add(`${p.fromIcao}-${p.toIcao}`));
     return s;
   }, [activePlanes]);
+
+  // Fuente de verdad para "En vuelo": solo los aviones que están físicamente
+  // en el mapa (activePlanes). Si no hay avión visible, el vuelo no está en vuelo.
+  const mapActiveFlightIds = useMemo(() =>
+    new Set(activePlanes.map(p => p.flightId)),
+  [activePlanes]);
 
   const activeHubSet = useMemo(() => {
     const s = new Set<string>();
@@ -856,7 +997,7 @@ export const SimulationDashboardView: React.FC = () => {
                     strokeWidth={1.5 / viewTransform.k}
                     fill="none"
                     opacity={0.95}
-                    strokeDasharray={!selectedFlight?.isActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                    strokeDasharray={!selectedFlightIsActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
                   />
                 );
               }
@@ -866,9 +1007,9 @@ export const SimulationDashboardView: React.FC = () => {
                     key={flight.id}
                     d={flight.projectedPath}
                     stroke="#ef4444"
-                    strokeWidth={1 / viewTransform.k}
+                    strokeWidth={0.8 / viewTransform.k}
                     fill="none"
-                    opacity={dimmed ? 0.15 : 0.9}
+                    opacity={dimmed ? 0.10 : 0.45}
                   />
                 );
               }
@@ -877,10 +1018,10 @@ export const SimulationDashboardView: React.FC = () => {
                   key={flight.id}
                   d={flight.projectedPath}
                   stroke="#94a3b8"
-                  strokeWidth={0.4 / viewTransform.k}
+                  strokeWidth={0.3 / viewTransform.k}
                   fill="none"
-                  strokeDasharray={`${3 / viewTransform.k} ${5 / viewTransform.k}`}
-                  opacity={INACTIVE_OPACITY}
+                  strokeDasharray={`${2 / viewTransform.k} ${6 / viewTransform.k}`}
+                  opacity={INACTIVE_OPACITY * 0.6}
                 />
               );
             })}
@@ -901,17 +1042,20 @@ export const SimulationDashboardView: React.FC = () => {
                   style={{ cursor: 'pointer' }}
                   onMouseEnter={(e) => {
                     const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTooltip({
-                      plane,
-                      screenX: e.clientX - (containerRect?.left ?? 0),
-                      screenY: e.clientY - (containerRect?.top ?? 0),
-                    });
+                    setPlaneTooltip({ plane, screenX: e.clientX - (containerRect?.left ?? 0), screenY: e.clientY - (containerRect?.top ?? 0) });
+                  }}
+                  onMouseMove={(e) => {
+                    if (!planeTooltip) return;
+                    const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setPlaneTooltip(prev => prev ? { ...prev, screenX: e.clientX - (containerRect?.left ?? 0), screenY: e.clientY - (containerRect?.top ?? 0) } : null);
                   }}
                   onMouseLeave={() => setPlaneTooltip(null)}
                   onClick={() => {
                     const sf = seenFlights.find(f => f.flightId === plane.flightId);
                     if (sf) focusOnFlight(sf);
                     else { setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId); setSelectedAirportId(null); }
+                    setInfoPanelOpen(true);
+                    setInfoPanelTab('flights');
                   }}
                 >
                   <AnimatedPlane
@@ -955,40 +1099,67 @@ export const SimulationDashboardView: React.FC = () => {
                   ? '#f59e0b'
                   : pct >= 90 ? '#ef4444'
                   : pct >= 70 ? '#f59e0b'
-                  : '#10b981';
+                  : currentStorage === 0 ? '#94a3b8'   // vacío — gris neutro
+                  : '#10b981';                          // óptimo — verde
 
               return (
                 <g
                   key={hub.id}
                   opacity={isDimmedHub ? 0.25 : 1}
                   style={{ cursor: 'pointer' }}
-                  onMouseEnter={() => {
-                    const { screenX, screenY } = getHubScreenPos(hub);
-                    setHubTooltip({ hub, screenX, screenY });
+                  onMouseEnter={(e) => {
+                    const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setHubTooltip({
+                      hub,
+                      screenX: e.clientX - (containerRect?.left ?? 0),
+                      screenY: e.clientY - (containerRect?.top ?? 0),
+                    });
+                  }}
+                  onMouseMove={(e) => {
+                    if (!hubTooltip) return;
+                    const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
+                    setHubTooltip(prev => prev ? {
+                      ...prev,
+                      screenX: e.clientX - (containerRect?.left ?? 0),
+                      screenY: e.clientY - (containerRect?.top ?? 0),
+                    } : null);
                   }}
                   onMouseLeave={() => setHubTooltip(null)}
-                  onClick={() => { focusOnAirport(hub.id); setSelectedFlightId(null); }}
+                  onClick={() => {
+                    focusOnAirport(hub.id);
+                    setSelectedFlightId(null);
+                    setInfoPanelOpen(true);
+                    setInfoPanelTab('airports');
+                  }}
                 >
                   {/* Zona de hover ampliada (invisible) */}
                   <circle cx={x} cy={y} r={r * 3} fill="transparent" />
-                  {/* Anillo de pulso cuando hay vuelos activos */}
+                  {/* Halo de selección / vuelos activos */}
                   {hasActiveFlights && (
-                    <circle cx={x} cy={y} r={r * 2.2}
-                      fill={isSelectedHub ? 'rgba(245,158,11,0.18)' : 'rgba(16,185,129,0.18)'} />
+                    <circle cx={x} cy={y} r={r * 2.4}
+                      fill={isSelectedHub ? 'rgba(245,158,11,0.15)' : 'rgba(59,130,246,0.12)'} />
                   )}
                   {isSelectedHub && (
-                    <circle cx={x} cy={y} r={r * 3}
+                    <circle cx={x} cy={y} r={r * 2.8}
                       fill="none" stroke={isAirportSelected ? '#6366f1' : '#f59e0b'}
-                      strokeWidth={1.5 / viewTransform.k}
-                      strokeDasharray={`${4 / viewTransform.k} ${3 / viewTransform.k}`} />
+                      strokeWidth={1.2 / viewTransform.k}
+                      strokeDasharray={`${3.5 / viewTransform.k} ${2.5 / viewTransform.k}`} />
                   )}
-                  <circle
-                    cx={x} cy={y} r={r}
+                  {/* Diamante (cuadrado rotado 45°) — marcador de aeropuerto */}
+                  <rect
+                    x={x - r * 0.82} y={y - r * 0.82}
+                    width={r * 1.64} height={r * 1.64}
+                    rx={r * 0.28}
                     fill={storageColor}
                     stroke="white"
-                    strokeWidth={1.5 / viewTransform.k}
+                    strokeWidth={1.4 / viewTransform.k}
+                    transform={`rotate(45,${x},${y})`}
                   />
-                  <circle cx={x} cy={y} r={rInner} fill="white" />
+                  {/* Cruz de pistas interior */}
+                  <line x1={x - r * 0.42} y1={y} x2={x + r * 0.42} y2={y}
+                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
+                  <line x1={x} y1={y - r * 0.42} x2={x} y2={y + r * 0.42}
+                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
                   {/* Etiqueta */}
                   <rect
                     x={x - 28 / viewTransform.k} y={y - 20 / viewTransform.k}
@@ -1171,8 +1342,8 @@ export const SimulationDashboardView: React.FC = () => {
         })()}
       </AnimatePresence>
 
-      {/* ── CONTROLES DE ZOOM (arriba a la izquierda) ──────────────────────── */}
-      <div className="absolute top-4 left-4 z-20 flex flex-col gap-1.5">
+      {/* ── CONTROLES DE ZOOM (debajo de la barra superior) ────────────────── */}
+      <div className="absolute top-[72px] left-4 z-20 flex flex-col gap-1.5">
         <button
           onClick={zoomIn}
           className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700"
@@ -1196,22 +1367,17 @@ export const SimulationDashboardView: React.FC = () => {
         </button>
       </div>
 
-      {/* ── BARRA INFERIOR: dashboard de simulación (control · métricas · leyenda) ── */}
-      <div
-        className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-stretch"
-        style={{ right: infoPanelOpen ? 'calc(46% + 1.5rem)' : '1rem' }}
-      >
-        {/* Popovers (se abren hacia arriba) */}
-        <AnimatePresence>
-          {bottomPopover === 'config' && !session && (
-            <motion.div
-              key="pop-config"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.15 }}
-              className="w-[320px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4 max-h-[62vh] overflow-y-auto custom-scrollbar"
-            >
+      {/* ── PANEL DE CONFIGURACIÓN (flotante en el mapa, disparado desde header) ── */}
+      <AnimatePresence>
+        {showConfig && !session && (
+          <motion.div
+            key="pop-config"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.15 }}
+            className="absolute top-4 left-4 z-40 w-[320px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4 max-h-[80vh] overflow-y-auto custom-scrollbar"
+          >
               <p className="text-[11px] font-black uppercase tracking-widest text-slate-700 mb-3">Configurar simulación</p>
               <div className="space-y-4">
                 <div className="space-y-2">
@@ -1310,142 +1476,56 @@ export const SimulationDashboardView: React.FC = () => {
               </div>
             </motion.div>
           )}
+        </AnimatePresence>
 
-          {bottomPopover === 'legend' && (
+      {/* ── BOTÓN LEYENDA (flotante en mapa, esquina inferior izquierda) ───── */}
+      <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-start">
+        <AnimatePresence>
+          {legendOpen && (
             <motion.div
               key="pop-legend"
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.15 }}
-              className="self-end w-[260px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4"
+              className="w-[240px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4"
             >
               <p className="text-[11px] font-black uppercase tracking-widest text-slate-700 mb-3">Leyenda</p>
-              <div className="space-y-2.5">
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Hubs</p>
-                <LegendRow dot="bg-emerald-500" label="Hub en estado óptimo" />
-                <LegendRow dot="bg-amber-500" label="Hub en alerta (>70% cap.)" />
-                <LegendRow dot="bg-red-500" label="Hub en punto crítico" />
+              <div className="space-y-2">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Aeropuertos ◆</p>
+                <LegendRow dot="bg-slate-400"   label="Almacén vacío" />
+                <LegendRow dot="bg-emerald-500" label="Almacén óptimo" />
+                <LegendRow dot="bg-amber-500"   label="En alerta (>70%)" />
+                <LegendRow dot="bg-red-500"     label="Punto crítico (>90%)" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
-                <LegendRow dot="bg-emerald-500" label="Avión con carga normal" />
-                <LegendRow dot="bg-amber-500" label="Avión casi lleno (>70%)" />
-                <LegendRow dot="bg-red-500" label="Avión en capacidad crítica" />
+                <LegendRow dot="bg-emerald-500" label="Carga normal" />
+                <LegendRow dot="bg-amber-500"   label="Casi lleno (>70%)" />
+                <LegendRow dot="bg-red-500"     label="Capacidad crítica" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
                 <div className="flex items-center gap-2.5">
-                  <div className="w-6 h-0.5 bg-red-500 rounded" />
-                  <span className="text-[10px] font-semibold text-slate-600">Ruta activa (con vuelo)</span>
+                  <div className="w-6 h-px bg-red-400 rounded" style={{ opacity: 0.6 }} />
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta activa</span>
                 </div>
                 <div className="flex items-center gap-2.5">
-                  <div className="flex gap-0.5">
-                    {[0,1,2].map(i => <div key={i} className="w-1.5 h-0.5 bg-slate-400" />)}
-                  </div>
+                  <div className="flex gap-0.5">{[0,1,2].map(i => <div key={i} className="w-1.5 h-px bg-slate-400" />)}</div>
                   <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
                 </div>
-                <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400 leading-snug">
+                <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400">
                   Rueda del ratón para zoom · Arrastrar para desplazar
                 </div>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
-
-        {/* Barra principal */}
-        <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-xl px-3 py-2.5 flex items-center gap-2 flex-wrap">
-          {/* Marca + sesión */}
-          <div className="flex items-center gap-2 pr-1">
-            <MapIcon className="w-4 h-4 text-indigo-600 shrink-0" />
-            <div className="flex flex-col leading-none">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-900">Simulación</span>
-              <span className="text-[9px] font-mono text-slate-400">{session ? `${session.id.substring(0, 10)}…` : 'Sin sesión activa'}</span>
-            </div>
-            {session && (
-              <div className={cn('w-2 h-2 rounded-full shrink-0', simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
-            )}
-          </div>
-
-          {session ? (
-            <>
-              <div className="h-9 w-px bg-slate-200 mx-1" />
-              <BottomStat label="T. simulado" value={formatSimElapsed(session.currentTimeAt || 0)} className="text-indigo-700" />
-              <BottomStat label="T. real"     value={formatRealElapsed(elapsedRealMs)}            className="text-emerald-700" />
-              <BottomStat label="Vuelos act."  value={activePlanes.length}                          className="text-slate-700" />
-
-              <div className="flex gap-1.5 ml-1">
-                <button
-                  onClick={simRunning ? pauseSimulation : startSimulation}
-                  disabled={session.status === 'starting'}
-                  className={cn(
-                    'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
-                    session.status === 'starting'
-                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                      : simRunning
-                        ? 'bg-amber-500 hover:bg-amber-400 text-white'
-                        : 'bg-emerald-500 hover:bg-emerald-400 text-white'
-                  )}
-                >
-                  {session.status === 'starting'
-                    ? <span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
-                    : simRunning
-                      ? <><Pause className="w-4 h-4" />Pausar</>
-                      : <><Play className="w-4 h-4" />Reanudar</>
-                  }
-                </button>
-                <button
-                  onClick={resetSimulation}
-                  className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 transition-all"
-                  title="Reiniciar"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="h-9 w-px bg-slate-200 mx-1" />
-
-              {dashboardMetrics ? (
-                <>
-                  <BottomStat label="Entregadas" value={dashboardMetrics.delivered}                 className="text-emerald-700" />
-                  <BottomStat label="Pendientes" value={dashboardMetrics.pending}                   className="text-amber-700" />
-                  <BottomStat label="En vuelo"   value={dashboardMetrics.inFlight}                  className="text-blue-700" />
-                  <BottomStat label="Asignadas"  value={dashboardMetrics.assigned}                  className="text-indigo-700" />
-                  <BottomStat label="SLA venc."  value={dashboardMetrics.slaBreaches}               className="text-red-600" />
-                  <BottomStat label="Rend./h"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
-                </>
-              ) : (
-                <span className="text-[10px] text-slate-400 px-1">
-                  {session.status === 'starting' ? 'Iniciando…' : 'Cargando métricas…'}
-                </span>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="h-9 w-px bg-slate-200 mx-1" />
-              <button
-                onClick={() => setBottomPopover(p => p === 'config' ? null : 'config')}
-                className={cn(
-                  'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
-                  bottomPopover === 'config' ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-                )}
-              >
-                <Settings2 className="w-4 h-4" /> Configurar simulación
-                {bottomPopover === 'config' ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
-              </button>
-            </>
+        <button
+          onClick={() => setLegendOpen(v => !v)}
+          className={cn(
+            'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg',
+            legendOpen ? 'bg-slate-800 text-white' : 'bg-white/90 backdrop-blur-md text-slate-600 border border-slate-200 hover:bg-slate-50'
           )}
-
-          {/* Leyenda (siempre) */}
-          <div className="ml-auto pl-1">
-            <button
-              onClick={() => setBottomPopover(p => p === 'legend' ? null : 'legend')}
-              className={cn(
-                'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all',
-                bottomPopover === 'legend' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              )}
-            >
-              <MapIcon className="w-4 h-4" /> Leyenda
-              {bottomPopover === 'legend' ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-        </div>
+        >
+          <MapIcon className="w-4 h-4" /> Leyenda
+        </button>
       </div>
 
       {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos · Paquetes ──── */}
@@ -1477,6 +1557,17 @@ export const SimulationDashboardView: React.FC = () => {
               selectedFlightId={selectedFlightId}
               onSelectAirport={handleSelectAirportFromPanel}
               onSelectFlight={focusOnSimFlight}
+              onSelectShipment={focusOnShipment}
+              shipmentsInFlight={shipmentsInFlight}
+              activeTab={infoPanelTab}
+              onTabChange={setInfoPanelTab}
+              activeFlightIds={mapActiveFlightIds}
+              currentSimMs={(() => {
+                if (!session?.startTimeAt) return undefined;
+                const base = new Date(session.startTimeAt).getTime();
+                if (lastSimUpdate) return lastSimUpdate.simMs;
+                return base + (session.currentTimeAt || 0) * 3_600_000;
+              })()}
             />
           </motion.div>
         )}

@@ -3,12 +3,14 @@ import {
   Activity, Globe, Settings2, LayoutDashboard,
   LogOut, Calendar, Search, ChevronRight, ChevronDown, ChevronUp,
   Package, Plane, AlertTriangle, CheckCircle, TrendingUp, PackagePlus, Warehouse,
+  Play, Pause, RotateCcw,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 import { useNetworkData } from './hooks/useNetworkData';
 import { useAuthContext } from './providers/AuthProvider';
 import { useSimulationContext } from './providers/SimulationProvider';
+import { useOperationsContext } from './providers/OperationsProvider';
 
 import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
@@ -36,7 +38,11 @@ function formatTime(d: Date) {
 function AppContent() {
   const { user, logout, isAuthenticated, login } = useAuthContext();
   const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
-  const { session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
+  const {
+    session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics,
+    startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
+  } = useSimulationContext();
+  const { metrics: opsMetrics, activeFlightCount, connected: opsConnected } = useOperationsContext();
   const SPEED_FACTOR = 80;
 
   const [activeView, setActiveView] = useState<View>('dashboard');
@@ -44,7 +50,35 @@ function AppContent() {
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [simDashOpen, setSimDashOpen] = useState(false);
+  const [simConfigOpen, setSimConfigOpen] = useState(false);
   const simDashRef = useRef<HTMLDivElement>(null);
+
+  const simRunning = session?.status === 'running';
+
+  // Cronómetro de tiempo real de la sesión activa (solo en pestaña simulación)
+  const [elapsedRealMs, setElapsedRealMs] = useState(0);
+  useEffect(() => {
+    if (!sessionStartedAt || !session?.id || activeView !== 'simulation') {
+      setElapsedRealMs(0); return;
+    }
+    const startedAt = sessionStartedAt;
+    const id = setInterval(() => setElapsedRealMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [sessionStartedAt, session?.id, activeView]);
+
+  const formatSimElapsed = (totalHours: number) => {
+    const d = Math.floor(totalHours / 24);
+    const h = totalHours % 24;
+    return d > 0 ? `${d}d ${h}h` : `${h}h`;
+  };
+  const formatRealElapsed = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}h ${m.toString().padStart(2,'0')}m ${sec.toString().padStart(2,'0')}s`;
+    return `${m}m ${sec.toString().padStart(2,'0')}s`;
+  };
 
   // Cierra el panel si se hace clic fuera
   useEffect(() => {
@@ -68,13 +102,15 @@ function AppContent() {
     return () => clearInterval(id);
   }, []);
 
+  // La fecha simulada solo aparece cuando el usuario está en la pestaña de Simulación.
+  // En cualquier otra pestaña (incluida Operación Diaria) siempre muestra la hora real.
   const displayDate = useMemo(() => {
-    if (!session?.startTimeAt) return now;
+    if (activeView !== 'simulation' || !session?.startTimeAt) return now;
     if (lastSimUpdate && session.status === 'running') {
       return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * SPEED_FACTOR);
     }
     return new Date(new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000);
-  }, [now, session, lastSimUpdate, SPEED_FACTOR]);
+  }, [now, session, lastSimUpdate, SPEED_FACTOR, activeView]);
 
   // ── Rutas activas ────────────────────────────────────────────────────────
   const activeRoutes = useMemo(() => {
@@ -161,14 +197,106 @@ function AppContent() {
                 </span>
                 <span className="tabular-nums font-mono text-slate-500 text-xs mt-0.5">
                   {formatTime(displayDate)}
-                  {session && <span className="ml-1.5 text-indigo-400 font-bold">(simulado)</span>}
+                  {session && activeView === 'simulation' && <span className="ml-1.5 text-indigo-400 font-bold">(simulado)</span>}
                 </span>
               </div>
             </div>
 
-            {/* Dashboard de simulación — botón toggle.
-                En la vista de Simulación se oculta: sus métricas viven en la barra
-                inferior del mapa, para mantener el mapa limpio sin desplegables. */}
+            {/* ── Métricas de operación diaria en el header (solo vista Dashboard) ── */}
+            {activeView === 'dashboard' && (
+              <div className="flex items-center gap-2 flex-1 justify-center mx-4 min-w-0">
+                <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200 shrink-0">
+                  <div className={cn('w-2 h-2 rounded-full shrink-0', opsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
+                  <span className="text-[9px] font-mono text-slate-400 hidden sm:block">
+                    {opsConnected ? 'Conectado' : 'Reconectando…'}
+                  </span>
+                </div>
+                {opsMetrics && (
+                  <>
+                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    <SimStat label="Entregadas"  value={opsMetrics.delivered}                    className="text-emerald-700" />
+                    <SimStat label="Pendientes"  value={opsMetrics.pending}                      className="text-amber-700" />
+                    <SimStat label="En vuelo"    value={activeFlightCount}                       className="text-blue-700" />
+                    <SimStat label="Asignadas"   value={opsMetrics.assigned}                     className="text-indigo-700" />
+                    <SimStat label="SLA venc."   value={opsMetrics.slaBreaches}                  className="text-red-600" />
+                    <SimStat label="Rend./h"     value={opsMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── Controles de simulación en el header (solo vista Simulación) ── */}
+            {activeView === 'simulation' && (
+              <div className="flex items-center gap-2 flex-1 justify-center mx-4 min-w-0">
+                {session ? (
+                  <>
+                    <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200 shrink-0">
+                      <div className={cn('w-2 h-2 rounded-full shrink-0', simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
+                      <span className="text-[9px] font-mono text-slate-400 hidden sm:block">{session.id.substring(0, 10)}…</span>
+                    </div>
+                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    <SimStat label="T. Simulado" value={formatSimElapsed(session.currentTimeAt || 0)} className="text-indigo-700" />
+                    <SimStat label="T. Real"     value={formatRealElapsed(elapsedRealMs)}             className="text-emerald-700" />
+                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    <div className="flex gap-1 shrink-0">
+                      <button
+                        onClick={simRunning ? pauseSimulation : startSimulation}
+                        disabled={session.status === 'starting' || isLoading}
+                        className={cn(
+                          'px-2.5 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1 transition-all',
+                          session.status === 'starting'
+                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                            : simRunning
+                              ? 'bg-amber-500 hover:bg-amber-400 text-white'
+                              : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                        )}
+                      >
+                        {session.status === 'starting'
+                          ? <span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
+                          : simRunning
+                            ? <><Pause className="w-3.5 h-3.5" />Pausar</>
+                            : <><Play  className="w-3.5 h-3.5" />Reanudar</>
+                        }
+                      </button>
+                      <button
+                        onClick={resetSimulation}
+                        className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 transition-all"
+                        title="Detener simulación"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {dashboardMetrics && (
+                      <>
+                        <div className="h-7 w-px bg-slate-200 shrink-0" />
+                        <SimStat label="Entregadas" value={dashboardMetrics.delivered}                    className="text-emerald-700" />
+                        <SimStat label="Pendientes" value={dashboardMetrics.pending}                      className="text-amber-700" />
+                        <SimStat label="En vuelo"   value={dashboardMetrics.inFlight}                     className="text-blue-700" />
+                        <SimStat label="Asignadas"  value={dashboardMetrics.assigned}                     className="text-indigo-700" />
+                        <SimStat label="SLA venc."  value={dashboardMetrics.slaBreaches}                  className="text-red-600" />
+                        <SimStat label="Rend./h"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <button
+                    onClick={() => setSimConfigOpen(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-bold text-xs transition-all',
+                      simConfigOpen
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                    )}
+                  >
+                    <Settings2 className="w-3.5 h-3.5" />
+                    Configurar simulación
+                    {simConfigOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                )}
+              </div>
+            )}
+
+          {/* Dashboard de simulación — botón toggle (otras pestañas con sesión activa) */}
             {session && activeView !== 'simulation' && (
               <div className="relative" ref={simDashRef}>
                 <button
@@ -284,7 +412,10 @@ function AppContent() {
             className={cn('absolute inset-0', activeView === 'simulation' ? 'block' : 'hidden')}
             style={{ zIndex: activeView === 'simulation' ? 1 : 0 }}
           >
-            <SimulationDashboardView />
+            <SimulationDashboardView
+              showConfig={simConfigOpen}
+              onConfigClose={() => setSimConfigOpen(false)}
+            />
           </div>
 
           {/*
@@ -442,6 +573,15 @@ const COLOR_MAP: Record<MetricColor, string> = {
   red:     'bg-red-50     text-red-700     border-red-100',
   violet:  'bg-violet-50  text-violet-700  border-violet-100',
 };
+
+function SimStat({ label, value, className }: { label: string; value: React.ReactNode; className?: string }) {
+  return (
+    <div className="flex flex-col leading-tight px-1 shrink-0">
+      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
+      <span className={cn('text-sm font-black font-mono leading-tight', className)}>{value}</span>
+    </div>
+  );
+}
 
 function MetricCard({ icon, label, value, color }: {
   icon: React.ReactNode; label: string; value: number | string; color: MetricColor;
