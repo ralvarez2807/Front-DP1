@@ -214,12 +214,12 @@ function AppContent() {
                 {opsMetrics && (
                   <>
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
-                    <SimStat label="Entregadas"  value={opsMetrics.delivered}                    className="text-emerald-700" />
-                    <SimStat label="Pendientes"  value={opsMetrics.pending}                      className="text-amber-700" />
-                    <SimStat label="En vuelo"    value={activeFlightCount}                       className="text-blue-700" />
-                    <SimStat label="Asignadas"   value={opsMetrics.assigned}                     className="text-indigo-700" />
-                    <SimStat label="SLA venc."   value={opsMetrics.slaBreaches}                  className="text-red-600" />
-                    <SimStat label="Rend./h"     value={opsMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                    <SimStat label="Entregadas"        value={opsMetrics.delivered}                    className="text-emerald-700" />
+                    <SimStat label="Sin ruta asig."   value={opsMetrics.pending}                      className="text-amber-700" />
+                    <SimStat label="En tránsito"      value={activeFlightCount}                       className="text-blue-700" />
+                    <SimStat label="Con ruta asig."   value={opsMetrics.assigned}                     className="text-indigo-700" />
+                    <SimStat label="SLA venc."        value={opsMetrics.slaBreaches}                  className="text-red-600" />
+                    <SimStat label="Bultos/hora"      value={opsMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
                   </>
                 )}
               </div>
@@ -269,12 +269,12 @@ function AppContent() {
                     {dashboardMetrics && (
                       <>
                         <div className="h-7 w-px bg-slate-200 shrink-0" />
-                        <SimStat label="Entregadas" value={dashboardMetrics.delivered}                    className="text-emerald-700" />
-                        <SimStat label="Pendientes" value={dashboardMetrics.pending}                      className="text-amber-700" />
-                        <SimStat label="En vuelo"   value={dashboardMetrics.inFlight}                     className="text-blue-700" />
-                        <SimStat label="Asignadas"  value={dashboardMetrics.assigned}                     className="text-indigo-700" />
-                        <SimStat label="SLA venc."  value={dashboardMetrics.slaBreaches}                  className="text-red-600" />
-                        <SimStat label="Rend./h"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                        <SimStat label="Entregadas"      value={dashboardMetrics.delivered}                    className="text-emerald-700" />
+                        <SimStat label="Sin ruta asig." value={dashboardMetrics.pending}                      className="text-amber-700" />
+                        <SimStat label="En tránsito"    value={dashboardMetrics.inFlight}                     className="text-blue-700" />
+                        <SimStat label="Con ruta asig." value={dashboardMetrics.assigned}                     className="text-indigo-700" />
+                        <SimStat label="SLA venc."      value={dashboardMetrics.slaBreaches}                  className="text-red-600" />
+                        <SimStat label="Bultos/hora"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
                       </>
                     )}
                   </>
@@ -345,9 +345,9 @@ function AppContent() {
                       {dashboardMetrics ? (
                         <div className="p-5 grid grid-cols-3 gap-3">
                           <MetricCard icon={<Package className="w-4 h-4" />} label="Entregadas" value={dashboardMetrics.delivered} color="emerald" />
-                          <MetricCard icon={<Activity className="w-4 h-4" />} label="Pendientes" value={dashboardMetrics.pending} color="amber" />
-                          <MetricCard icon={<Plane className="w-4 h-4" />} label="En vuelo" value={dashboardMetrics.inFlight} color="blue" />
-                          <MetricCard icon={<CheckCircle className="w-4 h-4" />} label="Asignadas" value={dashboardMetrics.assigned} color="indigo" />
+                          <MetricCard icon={<Activity className="w-4 h-4" />} label="Sin ruta asig." value={dashboardMetrics.pending} color="amber" />
+                          <MetricCard icon={<Plane className="w-4 h-4" />} label="En tránsito" value={dashboardMetrics.inFlight} color="blue" />
+                          <MetricCard icon={<CheckCircle className="w-4 h-4" />} label="Con ruta asig." value={dashboardMetrics.assigned} color="indigo" />
                           <MetricCard icon={<AlertTriangle className="w-4 h-4" />} label="SLA vencidas" value={dashboardMetrics.slaBreaches} color="red" />
                           <MetricCard icon={<TrendingUp className="w-4 h-4" />} label="Rendim./h" value={dashboardMetrics.throughputPerHour.toFixed(1)} color="violet" />
                         </div>
