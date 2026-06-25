@@ -2,6 +2,61 @@ import api from './api';
 import { SimulationSession } from '../models/operational';
 import { SimulationScenario } from '../constants/domain';
 
+// ── Tipos de vistas en vivo de la simulación (compartidos con la UI) ─────────
+export interface SimAirport {
+  icao: string;
+  city: string;
+  continent: string;
+  load: number;
+  capacity: number;
+  occupancyPct: number;
+  occupancyLevel: string; // GREEN | AMBER | RED | EMPTY
+}
+
+export interface SimFlight {
+  flightId: string;
+  fromIcao: string;
+  toIcao: string;
+  depTime: string;
+  arrTime: string;
+  status: string; // SCHEDULED | DEPARTED | ARRIVED
+  load: number;
+  capacity: number;
+  occupancyPct: number;
+  occupancyLevel: string;
+}
+
+export interface SimShipment {
+  shipmentId: string;
+  originIcao: string;
+  destIcao: string;
+  deadlineUtc: string;
+  totalBaggages: number;
+  delivered: number;
+  noRoute: number;
+  onTime: number;
+  late: number;
+}
+
+// Maleta esperando físicamente en un aeropuerto (endpoint /airports/{icao}/transit)
+export interface AirportBaggage {
+  baggageId: string;
+  shipmentId: string;
+  destIcao: string;
+  deadlineUtc: string;
+  nextFlightId: string | null;
+  nextDepTime: string | null;
+}
+
+// Maleta a bordo / asignada a un vuelo (aplanada desde /flights/{flightId})
+export interface FlightBaggage {
+  baggageId: string;
+  shipmentId: string;
+  originIcao: string;
+  destIcao: string;
+  deadlineUtc: string;
+}
+
 function mapSession(data: any, config: { scenario: SimulationScenario; speed: number }): SimulationSession {
   const simTimeMs = data.simTime ? new Date(data.simTime).getTime() : 0;
   const simStartMs = data.simStart ? new Date(data.simStart).getTime() : 0;
@@ -102,14 +157,40 @@ export const simulationService = {
     return response.data;
   },
 
-  getSimAirports: async (id: string, signal?: AbortSignal): Promise<{ icao: string; city: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string }[]> => {
+  getSimAirports: async (id: string, signal?: AbortSignal): Promise<SimAirport[]> => {
     const response = await api.get(`/simulations/${id}/airports`, { signal });
     return response.data;
   },
 
-  getSimFlights: async (id: string, signal?: AbortSignal): Promise<{ flightId: string; fromIcao: string; toIcao: string; depTime: string; arrTime: string; status: string; load: number; capacity: number; occupancyPct: number; occupancyLevel: string }[]> => {
+  getSimFlights: async (id: string, signal?: AbortSignal): Promise<SimFlight[]> => {
     const response = await api.get(`/simulations/${id}/flights`, { signal });
     return response.data;
+  },
+
+  getSimShipments: async (id: string, signal?: AbortSignal): Promise<SimShipment[]> => {
+    const response = await api.get(`/simulations/${id}/shipments`, { signal });
+    return response.data;
+  },
+
+  // Maletas físicamente en un aeropuerto ahora (en espera de conexión).
+  getAirportBaggages: async (id: string, icao: string, signal?: AbortSignal): Promise<AirportBaggage[]> => {
+    const response = await api.get(`/simulations/${id}/airports/${icao}/transit`, { signal });
+    return response.data?.transit ?? [];
+  },
+
+  // Maletas a bordo / asignadas a un vuelo (aplanadas desde sus envíos).
+  getFlightBaggages: async (id: string, flightId: string, signal?: AbortSignal): Promise<FlightBaggage[]> => {
+    const response = await api.get(`/simulations/${id}/flights/${flightId}`, { signal });
+    const shipments: any[] = response.data?.shipments ?? [];
+    return shipments.flatMap(s =>
+      (s.baggages ?? []).map((b: any) => ({
+        baggageId: b.baggageId,
+        shipmentId: s.shipmentId,
+        originIcao: s.originIcao,
+        destIcao: b.destIcao,
+        deadlineUtc: b.deadlineUtc,
+      }))
+    );
   },
 
   mapSessionPublic: (data: any, config: { scenario: SimulationScenario; speed: number }): SimulationSession =>
