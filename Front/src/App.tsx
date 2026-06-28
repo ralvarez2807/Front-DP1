@@ -11,6 +11,7 @@ import { useNetworkData } from './hooks/useNetworkData';
 import { useAuthContext } from './providers/AuthProvider';
 import { useSimulationContext } from './providers/SimulationProvider';
 import { useOperationsContext } from './providers/OperationsProvider';
+import { SlaBreachesModal } from './components/SlaBreachesModal';
 
 import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
@@ -54,6 +55,9 @@ function AppContent() {
   const simDashRef = useRef<HTMLDivElement>(null);
 
   const simRunning = session?.status === 'running';
+
+  // Modal forense de incumplimientos de SLA (al hacer clic en el contador)
+  const [slaModalOpen, setSlaModalOpen] = useState(false);
 
   // Cronómetro de tiempo real de la sesión activa (solo en pestaña simulación)
   const [elapsedRealMs, setElapsedRealMs] = useState(0);
@@ -273,7 +277,7 @@ function AppContent() {
                         <SimStat label="Sin ruta asig." value={dashboardMetrics.pending}                      className="text-amber-700" />
                         <SimStat label="En tránsito"    value={dashboardMetrics.inFlight}                     className="text-blue-700" />
                         <SimStat label="Con ruta asig." value={dashboardMetrics.assigned}                     className="text-indigo-700" />
-                        <SimStat label="SLA venc."      value={dashboardMetrics.slaBreaches}                  className="text-red-600" />
+                        <SimStat label="SLA venc."      value={dashboardMetrics.slaBreaches}                  className="text-red-600" onClick={session?.id ? () => setSlaModalOpen(true) : undefined} />
                         <SimStat label="Bultos/hora"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
                       </>
                     )}
@@ -535,6 +539,10 @@ function AppContent() {
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
       `}</style>
+
+      {slaModalOpen && session?.id && (
+        <SlaBreachesModal sessionId={session.id} onClose={() => setSlaModalOpen(false)} />
+      )}
     </div>
   );
 }
@@ -574,9 +582,13 @@ const COLOR_MAP: Record<MetricColor, string> = {
   violet:  'bg-violet-50  text-violet-700  border-violet-100',
 };
 
-function SimStat({ label, value, className }: { label: string; value: React.ReactNode; className?: string }) {
+function SimStat({ label, value, className, onClick }: { label: string; value: React.ReactNode; className?: string; onClick?: () => void }) {
   return (
-    <div className="flex flex-col leading-tight px-1 shrink-0">
+    <div
+      className={cn('flex flex-col leading-tight px-1 shrink-0', onClick && 'cursor-pointer rounded-md hover:bg-slate-100 transition-colors')}
+      onClick={onClick}
+      title={onClick ? 'Ver detalle de incumplimientos' : undefined}
+    >
       <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
       <span className={cn('text-sm font-black font-mono leading-tight', className)}>{value}</span>
     </div>

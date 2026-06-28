@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import {
   Play, Pause, RotateCcw, Settings2, Database,
   Map as MapIcon, Clock, AlertTriangle, CheckCircle,
-  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, X,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -11,7 +11,7 @@ import { useSocket } from '../providers/SocketProvider';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
-import { simulationService, SimAirport, SimFlight, SimShipment } from '../services/simulationService';
+import { simulationService, SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
@@ -94,6 +94,20 @@ function getPlaneColor(occupied: number, capacity: number, highlighted: boolean)
   return '#10b981';
 }
 
+// Reloj de animación que se CONGELA mientras la simulación está en pausa.
+// Los aviones se animan con tiempo real (Date.now), pero al pausar el backend
+// deja de avanzar; sin esto los aviones seguirían deslizándose en el mapa.
+// now() descuenta el tiempo acumulado en pausa, así al reanudar no hay salto.
+const animClock = {
+  pausedAt: null as number | null,
+  offset: 0,
+  now(): number { return (this.pausedAt ?? Date.now()) - this.offset; },
+  pause(): void { if (this.pausedAt === null) this.pausedAt = Date.now(); },
+  resume(): void {
+    if (this.pausedAt !== null) { this.offset += Date.now() - this.pausedAt; this.pausedAt = null; }
+  },
+};
+
 // ── Componente de avión animado a lo largo de un arco ─────────────────────
 function AnimatedPlane({
   x1, y1, x2, y2,
@@ -117,7 +131,7 @@ function AnimatedPlane({
 
   useEffect(() => {
     const tick = () => {
-      const elapsed = Date.now() - startedAt;
+      const elapsed = animClock.now() - startedAt;
       const p = Math.min(elapsed / durationMs, 1);
       setProgress(p);
       if (p < 1) rafRef.current = requestAnimationFrame(tick);
@@ -478,7 +492,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
       setActivePlanes(prev => [
         ...prev.filter(p => p.key !== key),
-        { key, flightId: fid, fromIcao, toIcao, startedAt: Date.now(), durationMs, capacity, occupied },
+        { key, flightId: fid, fromIcao, toIcao, startedAt: animClock.now(), durationMs, capacity, occupied },
       ]);
       setSeenFlights(prev => {
         const entry: SeenFlight = { flightId: fid, scheduleId: schedId, fromIcao, toIcao, seenAt: Date.now(), isActive: true };
@@ -570,7 +584,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       });
     });
 
-    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); };
+    // BAGGAGE_ASSIGNED: el planificador acaba de asignar rutas a una o más maletas.
+    // Disparar un refresh rápido de la lista de vuelos para que la columna CARGA
+    // refleje la nueva carga sin esperar el intervalo de 8s del polling regular.
+    const unsubBagAssigned = socket.on('BAGGAGE_ASSIGNED', () => {
+      setTimeout(() => fetchFlightLoadsRef.current?.(), 800);
+    });
+
+    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); unsubBagAssigned(); };
   }, [socket]);
 
   // ── Restaurar aviones IN_FLIGHT desde snapshot (nueva pestaña / resync) ──
@@ -593,12 +614,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const simFlightMs  = arrMs - depMs;
       const durationMs   = Math.max(30_000, Math.round(simFlightMs / simSpeedRef.current));
       const simElapsedMs = Math.max(0, simNow - depMs);
-      const startedAt    = Date.now() - Math.round(simElapsedMs / simSpeedRef.current);
+      const startedAt    = animClock.now() - Math.round(simElapsedMs / simSpeedRef.current);
 
       const key = `${f.flightId}-${f.fromIcao}-${f.toIcao}`;
 
-      // Timer de limpieza cuando termine la animación visual
-      const remaining = durationMs - (Date.now() - startedAt);
+      // Timer de limpieza cuando termine la animación visual (en tiempo real restante)
+      const remaining = durationMs - Math.round(simElapsedMs / simSpeedRef.current);
       if (remaining > 0) {
         const timer = setTimeout(() => {
           setActivePlanes(prev => prev.filter(p => p.key !== key));
@@ -733,7 +754,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
   // Calcula la posición Bézier actual del avión (misma curva que AnimatedPlane)
   const getPlanePosition = useCallback((plane: ActivePlane, origin: typeof projectedHubs[0], dest: typeof projectedHubs[0]) => {
-    const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+    const t = Math.min(1, (animClock.now() - plane.startedAt) / plane.durationMs);
     const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
     const bcx = (origin.projectedX! + dest.projectedX!) / 2;
     const bcy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
@@ -817,24 +838,46 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     setSelectedFlightId(null);
   }, [focusOnAirport]);
 
-  // Enfocar un envío "En ruta": consulta el tramo activo del envío y navega al avión
+  // ── Ruta de un envío dibujada en el mapa (escalas / directo) ──────────────
+  const [routeOverlay, setRouteOverlay] =
+    useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
+
+  // Encuadra la cámara para que entren todos los aeropuertos dados.
+  const fitToHubs = useCallback((icaos: string[]) => {
+    const hubs = icaos
+      .map(ic => projectedHubs.find(h => h.id === ic))
+      .filter((h): h is typeof projectedHubs[0] => !!h);
+    if (hubs.length === 0) return;
+    const xs = hubs.map(h => h.projectedX!);
+    const ys = hubs.map(h => h.projectedY!);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const pad = 120;
+    const kX = MAP_VIEWBOX.width  / (maxX - minX + pad * 2);
+    const kY = MAP_VIEWBOX.height / (maxY - minY + pad * 2);
+    const k  = Math.max(1, Math.min(8, Math.min(kX, kY)));
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    setViewTransform(clamp(
+      MAP_VIEWBOX.width  / 2 - cx * k,
+      MAP_VIEWBOX.height / 2 - cy * k,
+      k,
+    ));
+  }, [projectedHubs, clamp]);
+
+  // Seleccionar un envío: trae su ruta completa, la dibuja y encuadra la cámara.
   const focusOnShipment = useCallback(async (s: SimShipment) => {
     if (!session?.id) return;
+    // Toggle: si ya está seleccionado, lo limpia.
+    if (routeOverlay?.shipmentId === s.shipmentId) { setRouteOverlay(null); return; }
     try {
-      const { fromIcao, toIcao } = await simulationService.getShipmentDetail(session.id, s.shipmentId);
-      if (!fromIcao || !toIcao) return;
-
-      // Buscar el avión en activePlanes que esté en ese tramo
-      const plane = activePlanes.find(p => p.fromIcao === fromIcao && p.toIcao === toIcao);
-      if (!plane) return;
-
-      const sf = seenFlights.find(f => f.flightId === plane.flightId);
-      if (sf) {
-        setInfoPanelTab('flights');
-        focusOnFlight(sf);
-      }
+      const legs = await simulationService.getShipmentRoute(session.id, s.shipmentId);
+      if (legs.length === 0) { setRouteOverlay(null); return; }
+      setSelectedFlightId(null);
+      setRouteOverlay({ shipmentId: s.shipmentId, legs });
+      const icaos = [legs[0].fromIcao, ...legs.map(l => l.toIcao)];
+      fitToHubs(icaos);
     } catch { /* silencioso */ }
-  }, [session?.id, activePlanes, seenFlights, focusOnFlight]);
+  }, [session?.id, routeOverlay, fitToHubs]);
 
   // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
   const selectedFlightIdRef = useRef<string | null>(null);
@@ -856,7 +899,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       if (!origin || !dest) { rafId = requestAnimationFrame(follow); return; }
 
       // Misma curva de Bézier que AnimatedPlane
-      const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+      const t = Math.min(1, (animClock.now() - plane.startedAt) / plane.durationMs);
       const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
       const cx = (origin.projectedX! + dest.projectedX!) / 2;
       const cy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
@@ -924,6 +967,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
   const simRunning = session?.status === 'running';
   const hasSession = !!session;
+
+  // Congela la animación de aviones cuando la simulación está en pausa, y la
+  // reanuda sin salto. Sin esto los aviones seguían deslizándose con el reloj real.
+  useEffect(() => {
+    if (session?.status === 'paused') animClock.pause();
+    else animClock.resume();
+  }, [session?.status]);
 
   // Si hay un vuelo seleccionado, atenuar más todo lo demás
   const INACTIVE_OPACITY = selectedFlightId ? 0.02 : (hasSession ? 0.04 : 0.08);
@@ -1026,6 +1076,65 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               );
             })}
           </g>
+
+          {/* Ruta del envío seleccionado (escalas / directo) */}
+          {routeOverlay && (
+            <g className="shipment-route">
+              {routeOverlay.legs.map((leg, i) => {
+                const o = hubIndex.get(leg.fromIcao);
+                const d = hubIndex.get(leg.toIcao);
+                if (!o || !d) return null;
+                const dist = Math.sqrt((d.projectedX! - o.projectedX!) ** 2 + (d.projectedY! - o.projectedY!) ** 2);
+                const cx = (o.projectedX! + d.projectedX!) / 2;
+                const cy = (o.projectedY! + d.projectedY!) / 2 - dist * 0.2;
+                const path = `M ${o.projectedX} ${o.projectedY} Q ${cx} ${cy} ${d.projectedX} ${d.projectedY}`;
+                const color = leg.state === 'ARRIVED' ? '#10b981'
+                            : leg.state === 'DEPARTED' ? '#f59e0b'
+                            : '#2563eb';
+                const planned = leg.state === 'PLANNED';
+                return (
+                  <path
+                    key={`${leg.fromIcao}-${leg.toIcao}-${i}`}
+                    d={path}
+                    stroke={color}
+                    strokeWidth={(planned ? 1.6 : 2.0) / viewTransform.k}
+                    fill="none"
+                    opacity={0.95}
+                    strokeLinecap="round"
+                    strokeDasharray={planned ? `${5 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                  />
+                );
+              })}
+              {/* Marcadores: origen, escalas y destino */}
+              {[routeOverlay.legs[0]?.fromIcao, ...routeOverlay.legs.map(l => l.toIcao)]
+                .filter((ic, idx, arr) => ic && ic !== arr[idx - 1])
+                .map((ic, idx, arr) => {
+                  const h = hubIndex.get(ic!);
+                  if (!h) return null;
+                  const isOrigin = idx === 0;
+                  const isDest   = idx === arr.length - 1;
+                  const fill = isOrigin ? '#10b981' : isDest ? '#2563eb' : '#f59e0b';
+                  const r = (isOrigin || isDest ? 3.4 : 2.6) / viewTransform.k;
+                  return (
+                    <g key={`stop-${ic}-${idx}`}>
+                      <circle cx={h.projectedX!} cy={h.projectedY!} r={r + 1.5 / viewTransform.k} fill="white" opacity={0.9} />
+                      <circle cx={h.projectedX!} cy={h.projectedY!} r={r} fill={fill} />
+                      <text
+                        x={h.projectedX!}
+                        y={h.projectedY! - (r + 3 / viewTransform.k)}
+                        textAnchor="middle"
+                        fontSize={5 / viewTransform.k}
+                        fontWeight={700}
+                        fill="#0f172a"
+                        style={{ paintOrder: 'stroke', stroke: 'white', strokeWidth: 1.5 / viewTransform.k }}
+                      >
+                        {ic}
+                      </text>
+                    </g>
+                  );
+                })}
+            </g>
+          )}
 
           {/* Aviones animados */}
           <g className="planes" filter="url(#plane-glow)">
@@ -1183,6 +1292,43 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           </g>
         </g>
       </svg>
+
+      {/* ── CHIP RUTA DEL ENVÍO ─────────────────────────────────────────────── */}
+      {routeOverlay && (() => {
+        const stops = [routeOverlay.legs[0]?.fromIcao, ...routeOverlay.legs.map(l => l.toIcao)]
+          .filter((ic, idx, arr) => ic && ic !== arr[idx - 1]);
+        const connections = Math.max(0, stops.length - 2);
+        return (
+          <div className="absolute top-[72px] left-1/2 -translate-x-1/2 z-30 bg-white/97 backdrop-blur-md rounded-xl border border-slate-200 shadow-xl px-4 py-2.5 flex items-center gap-3">
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Ruta del envío</span>
+              <span className="text-sm font-black text-slate-900 font-mono">{routeOverlay.shipmentId}</span>
+            </div>
+            <div className="h-8 w-px bg-slate-200" />
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+              {stops.map((ic, i) => (
+                <React.Fragment key={`chip-${ic}-${i}`}>
+                  {i > 0 && <span className="text-slate-300">→</span>}
+                  <span className="font-mono">{ic}</span>
+                </React.Fragment>
+              ))}
+            </div>
+            <span className={cn(
+              'text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-md',
+              connections === 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700',
+            )}>
+              {connections === 0 ? 'Directo' : `${connections} escala${connections > 1 ? 's' : ''}`}
+            </span>
+            <button
+              onClick={() => setRouteOverlay(null)}
+              className="text-slate-400 hover:text-slate-700 transition-colors"
+              aria-label="Cerrar ruta"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        );
+      })()}
 
       {/* ── TOOLTIP HUB ─────────────────────────────────────────────────────── */}
       <AnimatePresence>

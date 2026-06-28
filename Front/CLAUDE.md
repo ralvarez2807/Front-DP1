@@ -145,11 +145,15 @@ Diferencia entre maletas asignadas a una ruta pero en espera (`ASIGNADO`, azul) 
 
 ### Ordenamiento
 - **Vuelos:** `STATUS_RANK {DEPARTED:0, SCHEDULED:1, ARRIVED:2, CANCELLED:3}` — siempre "En vuelo" arriba; criterio secundario elegible (salida, llegada, carga, ruta)
-- **Envíos:** `SHIPMENT_STATUS_RANK {'EN VUELO':0,'ATRASADO':1,'ASIGNADO':2,'PENDIENTE':3,'SIN RUTA':4,'ENTREGADO':5}` — siempre en orden de urgencia; criterio secundario elegible
+- **Envíos:** `SHIPMENT_STATUS_RANK {'VENCIDO':0,'SIN RUTA':1,'EN VUELO':2,'ATRASADO':3,'ASIGNADO':4,'PENDIENTE':5,'ENTREGADO':6}` — siempre en orden de urgencia; criterio secundario elegible. **VENCIDO** = maletas sin entregar con deadline pasado (campo `breached` del backend).
 - **Aeropuertos:** ordenables por carga, nombre o región
 
-### Click en envío "EN VUELO"
-Al hacer click en un envío con estado `EN VUELO`: llama a `GET /simulations/:id/shipments/:shipmentId`, busca una maleta con `status: IN_FLIGHT` y un tramo con `state: DEPARTED`, extrae `fromIcao`/`toIcao` y navega al avión correspondiente en el mapa.
+### Click en un envío → ruta en el mapa
+Al hacer click en un envío con ruta (cualquiera salvo PENDIENTE/ENTREGADO): `getShipmentRoute` trae sus tramos (`/shipments/:id`, maleta con más escalas) y se dibujan sobre el mapa (verde recorrido / ámbar en vuelo / azul punteado planificado) con chip "Directo / N escalas" y encuadre de cámara.
+
+### Forense de fallos
+- **Lupa** en envíos VENCIDO/SIN RUTA → `DiagnosticsModal` (`/shipments/:id/diagnostics`): veredicto en vivo (PLANNER_MISS / DEADLINE_INFEASIBLE / NO_CONNECTIVITY), mejor llegada posible y vuelos directos con motivo.
+- **Contador "SLA venc."** del header (clicable) → `SlaBreachesModal` (`/sla-breaches`): foto del instante exacto de cada incumplimiento, con la causa clasificada.
 
 ## Operación Día a Día
 
