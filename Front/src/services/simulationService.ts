@@ -39,6 +39,48 @@ export interface SimShipment {
   breached: number; // maletas sin entregar cuyo deadline ya venció
 }
 
+// ── Diagnóstico forense de un envío incumplido / sin ruta ────────────────────
+export interface DiagDirectFlight {
+  flightId: string;
+  depUtc: string;
+  arrUtc: string;
+  remainingCapacity: number;
+  usable: boolean;
+  reason: string;
+}
+export interface BaggageDiagnostic {
+  baggageId: string;
+  status: string;
+  currentIcao: string;
+  availableFromUtc: string;
+  minutesToDeadline: number;
+  hasCompleteRoute: boolean;
+  reachableInTime: boolean;
+  bestEffortArrivalUtc: string | null;
+  bestEffortLateMinutes: number;
+  bestEffortHops: number;
+  verdict: string;     // DELIVERED_LATE | NO_CONNECTIVITY | DEADLINE_INFEASIBLE | PLANNER_MISS | ON_TRACK
+  explanation: string;
+  directFlights: DiagDirectFlight[];
+}
+export interface ShipmentDiagnostics {
+  shipmentId: string;
+  originIcao: string;
+  destIcao: string;
+  deadlineUtc: string;
+  simNowUtc: string;
+  baggages: BaggageDiagnostic[];
+}
+
+// Tramo de la ruta de un envío (para dibujar en el mapa)
+export interface ShipmentRouteLeg {
+  fromIcao: string;
+  toIcao: string;
+  depTime: string;
+  arrTime: string;
+  state: 'ARRIVED' | 'DEPARTED' | 'PLANNED';
+}
+
 // Maleta esperando físicamente en un aeropuerto (endpoint /airports/{icao}/transit)
 export interface AirportBaggage {
   baggageId: string;
@@ -189,6 +231,32 @@ export const simulationService = {
       if (activeLeg) return { fromIcao: activeLeg.fromIcao, toIcao: activeLeg.toIcao };
     }
     return { fromIcao: null, toIcao: null };
+  },
+
+  // Forense de por qué un envío incumplió SLA / quedó sin ruta.
+  getShipmentDiagnostics: async (id: string, shipmentId: string, signal?: AbortSignal): Promise<ShipmentDiagnostics> => {
+    const response = await api.get(`/simulations/${id}/shipments/${shipmentId}/diagnostics`, { signal });
+    return response.data;
+  },
+
+  // Ruta completa (representativa) de un envío para dibujarla en el mapa.
+  // Toma la maleta con más tramos (peor caso de escalas) y devuelve la secuencia
+  // ordenada origen→…→destino. state: ARRIVED (ya volado) | DEPARTED (en vuelo) | PLANNED.
+  getShipmentRoute: async (id: string, shipmentId: string, signal?: AbortSignal): Promise<ShipmentRouteLeg[]> => {
+    const response = await api.get(`/simulations/${id}/shipments/${shipmentId}`, { signal });
+    const baggages: any[] = response.data?.baggages ?? [];
+    let best: any[] = [];
+    for (const b of baggages) {
+      const route: any[] = b.route ?? [];
+      if (route.length > best.length) best = route;
+    }
+    return best.map((l: any) => ({
+      fromIcao: l.fromIcao,
+      toIcao:   l.toIcao,
+      depTime:  l.depTime,
+      arrTime:  l.arrTime,
+      state:    l.state,
+    }));
   },
 
   // Maletas físicamente en un aeropuerto ahora (en espera de conexión).

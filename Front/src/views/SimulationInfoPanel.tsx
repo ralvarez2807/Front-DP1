@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import {
   simulationService, SimAirport, SimFlight, SimShipment, AirportBaggage, FlightBaggage,
+  ShipmentDiagnostics,
 } from '../services/simulationService';
 
 // ── Tipos de pestaña ─────────────────────────────────────────────────────────
@@ -231,6 +232,120 @@ function effectiveStatus(f: SimFlight, currentSimMs?: number, activeFlightIds?: 
   return f.status;
 }
 
+// ── Modal de diagnóstico forense de un envío ─────────────────────────────────
+const VERDICT_META: Record<string, { label: string; cls: string }> = {
+  PLANNER_MISS:        { label: 'FALLO DEL PLANIFICADOR', cls: 'bg-red-100 text-red-700' },
+  DEADLINE_INFEASIBLE: { label: 'IMPOSIBLE POR HORARIO',  cls: 'bg-amber-100 text-amber-700' },
+  NO_CONNECTIVITY:     { label: 'SIN CONECTIVIDAD',       cls: 'bg-rose-200 text-rose-900' },
+  DELIVERED_LATE:      { label: 'ENTREGADA TARDE',        cls: 'bg-orange-100 text-orange-700' },
+  ON_TRACK:            { label: 'EN CAMINO',              cls: 'bg-slate-100 text-slate-600' },
+};
+
+function fmtDiagTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const MM = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  return `${String(d.getUTCDate()).padStart(2,'0')} ${MM[d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+}
+
+function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
+  sessionId: string; shipmentId: string; onClose: () => void;
+}) {
+  const [state, setState] = useState<LoadState<ShipmentDiagnostics>>({ status: 'loading' });
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    simulationService.getShipmentDiagnostics(sessionId, shipmentId, ctrl.signal)
+      .then(d => setState({ status: 'ready', data: [d] }))
+      .catch(() => setState({ status: 'error' }));
+    return () => ctrl.abort();
+  }, [sessionId, shipmentId]);
+
+  const diag = state.status === 'ready' ? state.data[0] : null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto custom-scrollbar"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 sticky top-0 bg-white">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Diagnóstico de envío</p>
+            <p className="text-base font-black font-mono text-slate-900">{shipmentId}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {state.status === 'loading' && <p className="text-sm text-slate-400 text-center py-8">Analizando…</p>}
+          {state.status === 'error'   && <p className="text-sm text-red-500 text-center py-8">No se pudo obtener el diagnóstico.</p>}
+          {diag && (
+            <>
+              <div className="text-[12px] text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+                <span><b className="font-mono">{diag.originIcao}</b> → <b className="font-mono">{diag.destIcao}</b></span>
+                <span>Deadline: <b>{fmtDiagTime(diag.deadlineUtc)}</b></span>
+                <span>Ahora (sim): <b>{fmtDiagTime(diag.simNowUtc)}</b></span>
+              </div>
+
+              {diag.baggages.length === 0 && (
+                <p className="text-sm text-emerald-600 py-4">Sin maletas problemáticas en este envío ahora mismo.</p>
+              )}
+
+              {diag.baggages.map(b => {
+                const meta = VERDICT_META[b.verdict] ?? { label: b.verdict, cls: 'bg-slate-100 text-slate-600' };
+                return (
+                  <div key={b.baggageId} className="border border-slate-200 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-black text-sm text-slate-800">{b.baggageId}</span>
+                      <span className={cn('text-[9px] font-black uppercase px-2 py-1 rounded-md', meta.cls)}>{meta.label}</span>
+                    </div>
+
+                    <p className="text-[12px] text-slate-700 leading-relaxed">{b.explanation}</p>
+
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-600">
+                      <span>Estado: <b>{b.status}</b></span>
+                      <span>Ubicación: <b className="font-mono">{b.currentIcao}</b></span>
+                      <span>Disponible desde: <b>{fmtDiagTime(b.availableFromUtc)}</b></span>
+                      <span>Margen al deadline: <b className={b.minutesToDeadline < 0 ? 'text-red-600' : ''}>{b.minutesToDeadline} min</b></span>
+                      {b.bestEffortArrivalUtc && (
+                        <>
+                          <span>Mejor llegada posible: <b>{fmtDiagTime(b.bestEffortArrivalUtc)}</b> ({b.bestEffortHops} vuelo[s])</span>
+                          <span>{b.bestEffortLateMinutes > 0
+                            ? <>Retraso mínimo: <b className="text-red-600">{b.bestEffortLateMinutes} min</b></>
+                            : <>Holgura: <b className="text-emerald-600">{-b.bestEffortLateMinutes} min</b></>}</span>
+                        </>
+                      )}
+                    </div>
+
+                    {b.directFlights.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                          Vuelos directos {b.currentIcao}→{diag.destIcao}
+                        </p>
+                        <div className="space-y-1">
+                          {b.directFlights.slice(0, 8).map(f => (
+                            <div key={f.flightId} className="flex items-center justify-between text-[11px] border-b border-slate-50 py-1">
+                              <span className="font-mono text-slate-600">{f.flightId}</span>
+                              <span className="text-slate-500">{fmtDiagTime(f.depUtc)}→{fmtDiagTime(f.arrUtc)} · cap {f.remainingCapacity}</span>
+                              <span className={cn('font-bold', f.usable ? 'text-emerald-600' : 'text-red-500')}>{f.usable ? 'OK' : f.reason}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const SimulationInfoPanel: React.FC<Props> = ({
   sessionId, hasSession, airports, flights, shipments,
   selectedAirportId, selectedFlightId, onSelectAirport, onSelectFlight, onSelectShipment,
@@ -300,6 +415,9 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   const [pkQuery, setPkQuery]   = useState('');
   const [pkStatus, setPkStatus] = useState('');
   const [pkRoute, setPkRoute]   = useState('');
+
+  // Envío cuyo diagnóstico forense está abierto
+  const [diagShipmentId, setDiagShipmentId] = useState<string | null>(null);
 
   // ── Aeropuertos filtrados ──────────────────────────────────────────────────
   const regions = useMemo(
@@ -676,15 +794,19 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                     {filteredShipments.slice(0, MAX_ROWS).map(s => {
                       const st = shipmentStatus(s, shipmentsInFlight);
                       const pct = s.totalBaggages > 0 ? (s.delivered / s.totalBaggages) * 100 : 0;
+                      // Hay ruta dibujable salvo sin plan (PENDIENTE) o ya cerrado
+                      // (ENTREGADO: el detalle no expone los tramos ya recorridos).
+                      const hasRoute = st.label !== 'PENDIENTE' && st.label !== 'ENTREGADO';
+                      const clickable = hasRoute && !!onSelectShipment;
                       return (
                         <div
                           key={s.shipmentId}
-                          onClick={st.label === 'EN VUELO' && onSelectShipment ? () => onSelectShipment(s) : undefined}
+                          onClick={clickable ? () => onSelectShipment!(s) : undefined}
                           className={cn(
                             'w-full grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 items-center px-4 py-3 text-left border-b border-slate-50',
-                            st.label === 'EN VUELO' && onSelectShipment && 'cursor-pointer hover:bg-indigo-50/40 transition-colors',
+                            clickable && 'cursor-pointer hover:bg-indigo-50/40 transition-colors',
                           )}
-                          title={st.label === 'EN VUELO' ? 'Click para localizar el avión' : undefined}
+                          title={clickable ? 'Click para ver la ruta en el mapa' : undefined}
                         >
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: st.dot }} />
@@ -697,10 +819,19 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                             <ChevronRight className="w-3 h-3 text-slate-300 shrink-0" />
                             <span>{s.destIcao}</span>
                           </div>
-                          <div>
+                          <div className="flex items-center gap-1">
                             <span className={cn('text-[8px] font-black uppercase px-1.5 py-1 rounded-full whitespace-nowrap', st.cls)}>
                               {st.label}
                             </span>
+                            {(st.label === 'VENCIDO' || st.label === 'SIN RUTA') && sessionId && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setDiagShipmentId(s.shipmentId); }}
+                                title="Diagnosticar por qué no se planificó"
+                                className="text-rose-500 hover:text-rose-700 shrink-0"
+                              >
+                                <Search className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                           <div className="text-right">
                             <div className="flex items-center justify-end gap-1 mb-1">
@@ -738,6 +869,14 @@ export const SimulationInfoPanel: React.FC<Props> = ({
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> En vivo
         </span>
       </div>
+
+      {diagShipmentId && sessionId && (
+        <DiagnosticsModal
+          sessionId={sessionId}
+          shipmentId={diagShipmentId}
+          onClose={() => setDiagShipmentId(null)}
+        />
+      )}
     </div>
   );
 };
