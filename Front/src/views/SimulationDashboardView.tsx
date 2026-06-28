@@ -570,7 +570,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       });
     });
 
-    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); };
+    // BAGGAGE_ASSIGNED: el planificador acaba de asignar rutas a una o más maletas.
+    // Disparar un refresh rápido de la lista de vuelos para que la columna CARGA
+    // refleje la nueva carga sin esperar el intervalo de 8s del polling regular.
+    const unsubBagAssigned = socket.on('BAGGAGE_ASSIGNED', () => {
+      setTimeout(() => fetchFlightLoadsRef.current?.(), 800);
+    });
+
+    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); unsubBagAssigned(); };
   }, [socket]);
 
   // ── Restaurar aviones IN_FLIGHT desde snapshot (nueva pestaña / resync) ──

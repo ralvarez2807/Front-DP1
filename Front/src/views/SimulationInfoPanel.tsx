@@ -63,6 +63,8 @@ function shipmentStatus(
 ): { label: string; cls: string; dot: string } {
   if (s.totalBaggages > 0 && s.delivered >= s.totalBaggages)
     return { label: 'ENTREGADO',  cls: 'bg-emerald-100 text-emerald-700', dot: '#10b981' };
+  if (s.breached > 0)
+    return { label: 'VENCIDO',    cls: 'bg-rose-200 text-rose-900',       dot: '#9f1239' };
   if (s.noRoute > 0)
     return { label: 'SIN RUTA',   cls: 'bg-red-100 text-red-700',         dot: '#ef4444' };
   if (s.late > 0)
@@ -257,15 +259,25 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, selectedAirportId]);
 
+  // Carga y refresca maletas del vuelo seleccionado cada 6s mientras esté abierto.
+  // Sin caché fija: el planificador asigna nuevas maletas continuamente y el panel
+  // debe reflejar el estado actual, no una foto congelada del primer clic.
   useEffect(() => {
-    if (!sessionId || !selectedFlightId || flightBags[selectedFlightId]) return;
+    if (!sessionId || !selectedFlightId) return;
     const fid = selectedFlightId;
+    let cancelled = false;
     const controller = new AbortController();
-    setFlightBags(p => ({ ...p, [fid]: { status: 'loading' } }));
-    simulationService.getFlightBaggages(sessionId, fid, controller.signal)
-      .then(data => setFlightBags(p => ({ ...p, [fid]: { status: 'ready', data } })))
-      .catch(() => setFlightBags(p => ({ ...p, [fid]: { status: 'error' } })));
-    return () => controller.abort();
+
+    const load = () => {
+      setFlightBags(p => ({ ...p, [fid]: { status: 'loading' } }));
+      simulationService.getFlightBaggages(sessionId, fid, controller.signal)
+        .then(data => { if (!cancelled) setFlightBags(p => ({ ...p, [fid]: { status: 'ready', data } })); })
+        .catch(() => { if (!cancelled) setFlightBags(p => ({ ...p, [fid]: { status: 'error' } })); });
+    };
+
+    load();
+    const interval = setInterval(load, 6_000);
+    return () => { cancelled = true; clearInterval(interval); controller.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, selectedFlightId]);
 
@@ -354,7 +366,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
 
   // ── Paquetes filtrados ──────────────────────────────────────────────────────
   const SHIPMENT_STATUS_RANK: Record<string, number> = {
-    'EN VUELO': 0, 'ATRASADO': 1, 'ASIGNADO': 2, 'PENDIENTE': 3, 'SIN RUTA': 4, 'ENTREGADO': 5,
+    'VENCIDO': 0, 'SIN RUTA': 1, 'EN VUELO': 2, 'ATRASADO': 3, 'ASIGNADO': 4, 'PENDIENTE': 5, 'ENTREGADO': 6,
   };
   const filteredShipments = useMemo(() => {
     const q = pkQuery.trim().toUpperCase();
@@ -601,8 +613,15 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                             <div>
                               <div className="flex items-baseline gap-1 mb-1">
                                 <span className="text-base font-black leading-none" style={{ color }}>
-                                  {f.capacity > 0 ? `${Math.round(f.occupancyPct)}%` : '—'}
+                                  {f.capacity > 0
+                                    ? `${f.occupancyPct < 1 ? f.occupancyPct.toFixed(1) : Math.round(f.occupancyPct)}%`
+                                    : '—'}
                                 </span>
+                                {f.capacity > 0 && (
+                                  <span className="text-[9px] font-mono text-slate-400 leading-none">
+                                    {f.load}/{f.capacity}
+                                  </span>
+                                )}
                               </div>
                               <Bar pct={f.occupancyPct} color={color} />
                             </div>
@@ -628,6 +647,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <SearchInput value={pkQuery} onChange={setPkQuery} placeholder="ID de envío…" />
                 <FilterSelect value={pkStatus} onChange={setPkStatus} options={[
                   { value: '',          label: 'Estado' },
+                  { value: 'VENCIDO',   label: 'Vencido (sin entregar)' },
                   { value: 'EN VUELO',  label: 'En vuelo' },
                   { value: 'ASIGNADO',  label: 'Asignado' },
                   { value: 'ATRASADO',  label: 'Atrasado' },

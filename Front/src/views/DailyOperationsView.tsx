@@ -7,7 +7,8 @@ import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider';
 import { AnimatedPlane } from '../components/map/AnimatedPlane';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
-import type { SimAirport, SimFlight } from '../services/simulationService';
+import { simulationService } from '../services/simulationService';
+import type { SimAirport, SimFlight, SimShipment } from '../services/simulationService';
 import { cn } from '../lib/utils';
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
@@ -48,7 +49,46 @@ function toSimFlight(p: OpsPlane): SimFlight {
 
 export const DailyOperationsView: React.FC = React.memo(() => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
-  const { planes, airports } = useOperationsContext();
+  const { planes, airports, ops } = useOperationsContext();
+
+  // ── Envíos y vuelos completos de la sesión de operaciones ────────────────
+  const [opsShipments, setOpsShipments] = useState<SimShipment[]>([]);
+  const [opsAllFlights, setOpsAllFlights] = useState<SimFlight[]>([]);
+
+  useEffect(() => {
+    const sessionId = ops?.id;
+    const opsStatus = ops?.status;
+    // Skip dead sessions — their /flights endpoint returns 404
+    if (!sessionId || opsStatus === 'stopped' || opsStatus === 'completed') return;
+
+    let cancelled = false;
+    let timerId: ReturnType<typeof setInterval> | null = null;
+
+    const doFetch = async () => {
+      if (cancelled) return;
+
+      // Flights: if session no longer exists (404) stop polling entirely
+      try {
+        const flights = await simulationService.getSimFlights(sessionId);
+        if (!cancelled) setOpsAllFlights(flights);
+      } catch (err: any) {
+        if (err?.response?.status === 404) {
+          if (timerId !== null) { clearInterval(timerId); timerId = null; }
+          return;
+        }
+      }
+
+      // Shipments: best-effort
+      try {
+        const shipments = await simulationService.getSimShipments(sessionId);
+        if (!cancelled) setOpsShipments(shipments);
+      } catch {}
+    };
+
+    doFetch();
+    timerId = setInterval(doFetch, 15_000);
+    return () => { cancelled = true; if (timerId !== null) clearInterval(timerId); };
+  }, [ops?.id, ops?.status]);
 
   // ── Panel lateral derecho ─────────────────────────────────────────────────
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
@@ -624,11 +664,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               <ChevronRight className="w-4 h-4" />
             </button>
             <SimulationInfoPanel
-              sessionId={null}
+              sessionId={ops?.id ?? null}
               hasSession={true}
               airports={opsAirportList}
-              flights={opsFlightList}
-              shipments={[]}
+              flights={opsAllFlights.length > 0 ? opsAllFlights : opsFlightList}
+              shipments={opsShipments}
               selectedAirportId={selectedAirportId}
               selectedFlightId={selectedFlightId}
               onSelectAirport={(icao) => {
@@ -637,7 +677,12 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               }}
               onSelectFlight={(sf) => {
                 const plane = planes.find(p => p.flightId === sf.flightId);
-                if (plane) focusOnPlane(plane);
+                if (plane) {
+                  focusOnPlane(plane);
+                } else {
+                  setSelectedFlightId(prev => prev === sf.flightId ? null : sf.flightId);
+                  setInfoPanelTab('flights');
+                }
               }}
               activeTab={infoPanelTab}
               onTabChange={setInfoPanelTab}

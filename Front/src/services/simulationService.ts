@@ -36,6 +36,7 @@ export interface SimShipment {
   noRoute: number;
   onTime: number;
   late: number;
+  breached: number; // maletas sin entregar cuyo deadline ya venció
 }
 
 // Maleta esperando físicamente en un aeropuerto (endpoint /airports/{icao}/transit)
