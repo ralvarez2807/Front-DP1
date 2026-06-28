@@ -72,6 +72,30 @@ export interface ShipmentDiagnostics {
   baggages: BaggageDiagnostic[];
 }
 
+// ── Foto forense de un incumplimiento de SLA (instante exacto) ───────────────
+export interface SlaBreachLeg {
+  fromIcao: string;
+  toIcao: string;
+  depUtc: string;
+  arrUtc: string;
+  state: 'ARRIVED' | 'DEPARTED' | 'PLANNED';
+}
+export interface SlaBreach {
+  breachTimeUtc: string;
+  baggageId: string;
+  shipmentId: string;
+  originIcao: string;
+  destIcao: string;
+  deadlineUtc: string;
+  statusAtBreach: string;       // PENDING | WAITING | IN_FLIGHT
+  locationIcao: string;
+  hadCompleteRoute: boolean;
+  plannedEtaUtc: string | null;
+  plannedEtaLateMinutes: number;
+  cause: string;
+  plannedRoute: SlaBreachLeg[];
+}
+
 // Tramo de la ruta de un envío (para dibujar en el mapa)
 export interface ShipmentRouteLeg {
   fromIcao: string;
@@ -231,6 +255,12 @@ export const simulationService = {
       if (activeLeg) return { fromIcao: activeLeg.fromIcao, toIcao: activeLeg.toIcao };
     }
     return { fromIcao: null, toIcao: null };
+  },
+
+  // Foto forense de cada incumplimiento de SLA en el instante en que ocurrió.
+  getSlaBreaches: async (id: string, signal?: AbortSignal): Promise<SlaBreach[]> => {
+    const response = await api.get(`/simulations/${id}/sla-breaches`, { signal });
+    return response.data ?? [];
   },
 
   // Forense de por qué un envío incumplió SLA / quedó sin ruta.

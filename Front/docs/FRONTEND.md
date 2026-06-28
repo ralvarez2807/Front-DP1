@@ -280,8 +280,10 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
 | GET | `/simulations/{id}/flights` | — | Lista de vuelos con ocupación |
 | GET | `/simulations/{id}/baggage/{baggageId}` | — | Tracking de una maleta |
 | GET | `/simulations/{id}/baggage/{baggageId}/route` | — | Ruta completa de una maleta |
-| GET | `/simulations/{id}/shipments` | — | Todos los envíos con conteo por estado |
-| GET | `/simulations/{id}/shipments/{shipmentId}` | — | Detalle de un envío con sus maletas |
+| GET | `/simulations/{id}/shipments` | — | Todos los envíos con conteo por estado (incl. `breached`) |
+| GET | `/simulations/{id}/shipments/{shipmentId}` | simulationService | Detalle / ruta del envío (`getShipmentRoute` para el mapa) |
+| GET | `/simulations/{id}/shipments/{shipmentId}/diagnostics` | simulationService | Forense en vivo de por qué no se planificó (lupa del panel) |
+| GET | `/simulations/{id}/sla-breaches` | simulationService | Foto del instante de cada incumplimiento (modal del contador SLA) |
 | GET | `/simulations/{id}/reports/summary` | — | Resumen de simulación |
 
 ---
@@ -402,7 +404,18 @@ Solo se persiste en localStorage `simulation_config = { scenario, speed }` (no e
 - **Panel de control** (con sesión activa): Play/Pausa, Detener, tiempo simulado T+Xh, contador de vuelos activos.
 - **Log de eventos** colapsable: últimos 15 eventos WebSocket en tiempo real.
 - **Aviones animados**: ícono viaja a lo largo del arco al recibir `FLIGHT_DEPARTED`; se elimina al recibir `FLIGHT_ARRIVED`.
+  - La animación usa un **reloj de animación (`animClock`) que se congela en pausa** y descuenta el tiempo en pausa al reanudar (sin salto). Sin esto los aviones seguían moviéndose con el reloj real aunque el backend estuviera pausado.
 - **Vista siempre montada y oculta por CSS** para preservar zoom/pan al cambiar de pestaña.
+
+#### Panel lateral de envíos (`SimulationInfoPanel`)
+
+- Pestaña **Paquetes**: lista de envíos con estado derivado del backend. Estados, de más severo a menos: **VENCIDO** (maletas sin entregar con deadline pasado, campo `breached`) → **SIN RUTA** → EN VUELO → ATRASADO → ASIGNADO → PENDIENTE → ENTREGADO. Hay filtro por cada uno.
+- **Ruta en el mapa**: clic en un envío con ruta dibuja sus tramos sobre el mapa (verde = recorrido, ámbar = en vuelo, azul punteado = planificado), marca origen/escalas/destino y encuadra la cámara. Un chip flotante muestra **"Directo / N escalas"**. Usa `getShipmentRoute` (toma la maleta con más tramos como representativa).
+- **Lupa de diagnóstico** (envíos VENCIDO/SIN RUTA): abre `DiagnosticsModal` con el forense en vivo — veredicto `PLANNER_MISS` / `DEADLINE_INFEASIBLE` / `NO_CONNECTIVITY`, mejor llegada posible y vuelos directos con el motivo por el que no sirven.
+
+#### Contador "SLA venc." (top bar, `App.tsx`)
+
+- Es **clicable**: abre `SlaBreachesModal` con la lista forense del **instante exacto** de cada incumplimiento (`getSlaBreaches`): hora del vencimiento, ubicación/estado de la maleta, si tenía ruta, ETA del plan y la causa clasificada (sin ruta / ruta lenta / etc.).
 
 ### Monitoreo (MonitoringView)
 

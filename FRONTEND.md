@@ -244,6 +244,10 @@ El SVG del avión apunta hacia arriba (nariz en `cy=-8`), por eso se suma 90° a
 Escala base: `0.6 / viewTransform.k` (se reduce con zoom para que siempre se vea igual de pequeño en pantalla).
 Colores: verde < 70%, ámbar 70-90%, rojo ≥ 90% de capacidad.
 
+> **Pausa congela los aviones.** El `elapsed` usa `animClock.now()` (no `Date.now()` directo). `animClock` es un reloj de animación a nivel de módulo que se **congela mientras `session.status === 'paused'`** y descuenta el tiempo en pausa al reanudar, para que no haya salto. Los `startedAt` de los aviones y los RAF de cámara también usan `animClock.now()`. Sin esto, los aviones seguían deslizándose con el reloj real aunque el backend estuviera pausado.
+
+> **Ruta de un envío en el mapa.** Al seleccionar un envío en el panel se dibuja su ruta tramo a tramo (`getShipmentRoute`): verde = recorrido, ámbar = en vuelo, azul punteado = planificado, con marcadores de origen/escalas/destino y un chip "Directo / N escalas". La cámara encuadra la ruta (`fitToHubs`).
+
 ---
 
 ### Sistema de duraciones reales por vuelo (`flightDurationsRef`)
@@ -454,6 +458,10 @@ El fetch de `/flights` se ejecuta inmediatamente al montar (no espera el primer 
 
 **Modal "Prueba de Estrés"**: confirmación antes de lanzar escenario COLLAPSE. Describe las consecuencias.
 
+**Modal de diagnóstico de envío** (`DiagnosticsModal`, en `SimulationInfoPanel`): se abre desde la lupa de un envío VENCIDO/SIN RUTA. Muestra por maleta el veredicto (`PLANNER_MISS` / `DEADLINE_INFEASIBLE` / `NO_CONNECTIVITY`), la mejor llegada posible y los vuelos directos con su motivo. Fuente: `getShipmentDiagnostics`.
+
+**Modal de incumplimientos SLA** (`SlaBreachesModal`, montado en `App.tsx`): el contador **"SLA venc."** del header es clicable y abre la lista forense del instante exacto de cada incumplimiento (`getSlaBreaches`): hora, ubicación/estado de la maleta, si tenía ruta, ETA del plan y causa clasificada.
+
 ---
 
 ### Restauración de vuelos al recargar
@@ -506,7 +514,11 @@ POST /simulations/:id/resume             Reanudar
 POST /simulations/:id/stop               Detener
 GET  /simulations/:id/airports           Carga en aeropuertos
 GET  /simulations/:id/flights            Vuelos con depTime/arrTime/load/capacity
-GET  /simulations/:id/dashboard          Métricas globales
+GET  /simulations/:id/dashboard          Métricas globales (slaBreaches = entrega real vs deadline)
+GET  /simulations/:id/shipments          Envíos por estado (incl. breached → estado VENCIDO)
+GET  /simulations/:id/shipments/:sid     Detalle/ruta del envío (ruta en el mapa con escalas)
+GET  /simulations/:id/shipments/:sid/diagnostics   Forense en vivo (lupa): por qué no se planificó
+GET  /simulations/:id/sla-breaches       Forense del instante exacto de cada incumplimiento SLA
 GET  /simulations/:id/reports/summary    Reporte final al completar
 GET  /data/available-days                Fechas con datos en la BD
 GET  /airports                           Lista de aeropuertos (hubs)
