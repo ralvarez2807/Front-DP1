@@ -65,7 +65,7 @@ Archivo: `Front/.env` (debe existir; no está en git).
 
 | Tecnología | Versión | Uso |
 |---|---|---|
-| React | 18+ | Framework UI |
+| React | 19 | Framework UI |
 | TypeScript | 5+ | Tipado estático |
 | Vite | 5+ | Bundler + HMR + proxy HTTP |
 | Tailwind CSS | v4 | Estilos utility-first |
@@ -73,6 +73,13 @@ Archivo: `Front/.env` (debe existir; no está en git).
 | Axios | última | Cliente HTTP (JWT auto-inject) |
 | D3 + TopoJSON | — | Proyección cartográfica del mapa |
 | Lucide React | última | Íconos SVG |
+
+> ⚠️ **`node_modules/@types/react` no está instalado** (React 19, sin tipos, y el proyecto no
+> tiene `strict`/`noImplicitAny`). Esto degrada silenciosamente a `any` todo lo que toca hooks
+> de React sin avisar — `npx tsc --noEmit` solo detecta errores de **sintaxis**, no de tipos.
+> Un campo renombrado/eliminado de una interfaz no se detecta si se sigue usando en un
+> componente. Ver `Front/CLAUDE.md` para el detalle completo; no confiar en "tsc limpio" como
+> señal de "sin bugs" — hay que revisar el código a mano.
 
 Arquitectura de conexiones:
 
@@ -99,7 +106,9 @@ Principios inmutables que rigen el comportamiento del sistema.
 Solo se soportan 3 escenarios. No se permiten escenarios custom:
 1. **Operación Diaria (daily)**: 24 h de operación nominal.
 2. **Operación Periodo 5 Días (period_5d)**: Simulación de flujo multi-día.
-3. **Operación hasta el Colapso (collapse)**: Estrés de red hasta saturación de nodos.
+3. **Operación hasta el Colapso (collapse)**: Estrés de red hasta saturación de nodos. No es
+   un modo dedicado en el backend — mismo `POST /simulations` que `period_5d`, con el flag
+   `collapseOnFailure: true` sumado (detalle completo en sección 11).
 
 ### Arquitectura de eventos (tiempo real)
 - El frontend es reactivo a los eventos del servidor.
@@ -115,44 +124,85 @@ Solo se soportan 3 escenarios. No se permiten escenarios custom:
 - La capa de visualización debe estar desacoplada del ciclo de vida de React para optimizar el rendimiento.
 - Se prioriza la estabilidad de las proyecciones y geometrías.
 
+### Zona horaria y hora local por cuenta
+El backend maneja todo en UTC, pero el frontend **no muestra UTC crudo en ningún lado** —
+convierte cada hora a la zona horaria de la cuenta logueada:
+
+- `src/hooks/useUserTimezone.ts` resuelve un `gmtOffset` comparando `user.name` contra el
+  nombre de una ciudad de la red (mismo mecanismo que ya usaba `operatorAirport` en
+  `OrderUploadView` para fijar la sede del operario). Si no coincide con ninguna ciudad (p.
+  ej. `admin`), el offset es `0` (UTC+0). Depende de `useMap()` (necesita `projectedHubs`
+  cargado) — justo después de loguearse puede haber un flash de una sola vez con offset `0`
+  hasta que los hubs terminan de cargar.
+- `src/lib/timezone.ts` centraliza:
+  - **Salida** (backend → pantalla): `formatUserTime`/`formatUserDayTime`/`formatUserDate` —
+    desplazan el epoch ms por `gmtOffset*3_600_000` y leen los campos con `getUTC*()` sobre
+    ese `Date` desplazado (evita que el timezone propio del browser interfiera). Se usan en
+    el reloj de cabecera (`App.tsx`, con el `GMT±N` explícito entre paréntesis), `SlaBreachesModal`,
+    `SimulationInfoPanel` (vuelos/maletas/diagnóstico) y la lista de órdenes de `OrderUploadView`.
+  - **Entrada** (pantalla → backend): `localToUtcMs`/`localInputToUtcIso` — toda hora que
+    tipea el usuario se interpreta en su propia zona y se convierte a UTC antes de mandarla.
+    Usado por `ordersFile.ts` (hora `hh-mm` del archivo de carga masiva, respecto al
+    **aeropuerto de origen elegido para ese archivo**, no necesariamente el de la cuenta si
+    es admin) y por `SimulationProvider.computeDateRange` (selector de fecha/hora de inicio
+    al arrancar una simulación de 5 días o colapso — ya no está fijo a UTC).
+- La carga manual de órdenes (un pedido a la vez) no tiene ningún campo de hora — no hay nada
+  que convertir ahí, el backend usa `Instant.now()` del servidor.
+
 ---
 
 ## 5. Estructura de carpetas
 
 ```
 Front/src/
-├── App.tsx                    ← Raíz: layout, sidebar, header, routing entre vistas
+├── App.tsx                    ← Raíz: layout, sidebar, header (reloj compartido), routing entre vistas
 ├── main.tsx                   ← Árbol de providers React
 ├── providers/
 │   ├── AuthProvider.tsx        ← Estado de autenticación (JWT en localStorage)
-│   ├── MapProvider.tsx         ← Proyección D3 del mapa; carga aeropuertos y rutas del backend
-│   ├── SimulationProvider.tsx  ← Estado de sesión de simulación + eventos WebSocket + polling
+│   ├── MapProvider.tsx         ← Proyección D3 del mapa; carga aeropuertos y rutas del backend (con retry)
+│   ├── SocketProvider.tsx      ← Singleton de WebSocket (socketService)
+│   ├── SimulationProvider.tsx  ← Estado de sesión de simulación (5 días/colapso) + eventos WS + polling
 │   ├── MonitoringProvider.tsx  ← Métricas y alertas en tiempo real
 │   ├── OperationsProvider.tsx  ← Operación Día a Día (singleton permanente, nunca se desmonta)
-│   ├── SocketProvider.tsx      ← Singleton de WebSocket (socketService)
+│   ├── BulkUploadProvider.tsx  ← Carga masiva de órdenes: vive fuera de la vista, sobrevive cambios de pestaña
 │   └── ToastProvider.tsx       ← Notificaciones flotantes
 ├── views/
 │   ├── DailyOperationsView.tsx      ← Mapa en vivo — Operación Día a Día
-│   ├── SimulationDashboardView.tsx  ← Mapa completo — control de simulación + aviones
+│   ├── SimulationDashboardView.tsx  ← Mapa completo — control de simulación (5 días / colapso) + aviones
+│   ├── SimulationInfoPanel.tsx      ← Panel lateral derecho, compartido entre simulación y día a día
+│   ├── OrderUploadView.tsx          ← Carga de órdenes: modo manual (un pedido) + carga masiva por archivo
+│   ├── AirportManagerView.tsx       ← Tabla de gestión de aeropuertos (incluye gmtOffset)
 │   ├── MonitoringView.tsx           ← Métricas detalladas
 │   └── TrackingView.tsx             ← Rastreo de envíos por ID
+├── components/
+│   ├── Auth.tsx                ← Pantalla de login
+│   ├── AvailableDayPicker.tsx  ← Calendario de fechas disponibles (reutilizado en config de simulación)
+│   ├── SlaBreachesModal.tsx    ← Foto forense del instante exacto de cada incumplimiento de SLA
+│   ├── CollapseSummaryModal.tsx ← Cuadro de finalización al detectar colapso (tiempo simulado + real)
+│   └── map/AnimatedPlane.tsx   ← Avión animado (copia compartida; SimulationDashboardView tiene su propia copia local, ver sección 12)
 ├── services/
 │   ├── api.ts                 ← Cliente Axios (base URL + interceptor JWT + auto-refresh)
-│   ├── socket.ts              ← Clase SocketService (WebSocket directo al backend, con seq tracking)
-│   ├── authService.ts         ← POST /auth/login (SHA-256 del password)
-│   ├── simulationService.ts   ← CRUD de sesiones + getMine + snapshot
-│   ├── operationsService.ts   ← GET /operations; expone operationsSocket (instancia separada de SocketService)
-│   ├── hubService.ts          ← GET /data/airports → mapea a Hub[]
-│   └── flightService.ts       ← GET /data/routes → mapea a Flight[]
+│   ├── socket.ts               ← Clase SocketService (WebSocket directo al backend, con seq tracking)
+│   ├── authService.ts          ← POST /auth/login (SHA-256 del password)
+│   ├── simulationService.ts    ← CRUD de sesiones + getMine + snapshot + reportes SLA/diagnóstico
+│   ├── operationsService.ts    ← GET /operations; createOrder (día a día); expone operationsSocket (instancia separada de SocketService)
+│   ├── hubService.ts           ← GET /data/airports (incluye gmtOffset) → mapea a Hub[]; GET /data/available-days
+│   ├── airportService.ts       ← Datos de aeropuerto para el gestor (incluye gmtOffset)
+│   └── flightService.ts        ← GET /data/routes → mapea a Flight[]
 ├── hooks/
-│   └── useNetworkData.ts      ← Carga hubs y flights (recibe flag isAuthenticated)
+│   ├── useNetworkData.ts       ← Carga hubs y flights (recibe flag isAuthenticated)
+│   └── useUserTimezone.ts      ← Resuelve el gmtOffset de la cuenta logueada (ver sección "Zona horaria")
+├── lib/
+│   ├── ordersFile.ts           ← Parser de archivos de carga masiva (dos formatos, ver sección 12)
+│   ├── timezone.ts             ← Formateo/conversión hora local↔UTC (ver sección "Zona horaria")
+│   └── utils.ts                ← cn() (clsx + tailwind-merge)
 ├── constants/
-│   └── domain.ts              ← SCENARIOS, SCENARIO_LABELS, OPERATIONAL_EVENTS
+│   └── domain.ts               ← SCENARIOS, SCENARIO_LABELS, OPERATIONAL_EVENTS
 └── models/
-    ├── infrastructure.ts      ← Hub, Flight (interfaces + constantes de referencia)
-    ├── operational.ts         ← Shipment, SimulationSession, OperationalEvent
-    ├── monitoring.ts          ← MonitoringMetrics
-    └── auth.ts                ← User
+    ├── infrastructure.ts       ← Hub (incluye gmtOffset), Flight (interfaces + constantes mock, no usadas en runtime)
+    ├── operational.ts          ← Shipment, SimulationSession, OperationalEvent
+    ├── monitoring.ts           ← MonitoringMetrics
+    └── auth.ts                 ← User
 ```
 
 ---
@@ -162,19 +212,24 @@ Front/src/
 ```
 ToastProvider          notificaciones globales (toasts)
   AuthProvider         estado de sesión de usuario; JWT en localStorage
-    MapProvider        proyección D3 del mapa mundial; pre-calcula coords de hubs/rutas
+    MapProvider        proyección D3 del mapa mundial; carga aeropuertos/rutas del backend (con retry)
                        ⚠ Debe ir DENTRO de AuthProvider: carga /data/airports con token JWT
       SocketProvider   expone socketService singleton (no auto-conecta)
-        OperationsProvider  Operación Día a Día (siempre montado, nunca se desmonta)
-          SimulationProvider   sesión activa, event log, control pause/resume/stop
-            MonitoringProvider  métricas del dashboard; polling cada 10 s cuando hay sesión
-              App
+        SimulationProvider   sesión activa (5 días/colapso), event log, control pause/resume/stop
+          MonitoringProvider  métricas del dashboard; polling cada 10 s cuando hay sesión
+            OperationsProvider  Operación Día a Día (siempre montado, nunca se desmonta)
+              BulkUploadProvider  carga masiva de órdenes; vive fuera de la vista, sobrevive cambios de pestaña
+                App
 ```
 
 > `MonitoringProvider` puede leer `session.id` de `SimulationProvider` porque es hijo suyo.
 >
 > `OperationsProvider` y `SimulationProvider` usan instancias **separadas** de `SocketService`
 > (`operationsSocket` vs `socketService`) para que ambos streams coexistan sin interferencia.
+>
+> `SimulationProvider` (y cualquier provider que necesite `gmtOffset`/`useUserTimezone`) debe
+> estar DENTRO de `MapProvider` — el hook resuelve el offset comparando el usuario contra
+> `projectedHubs`, que solo existe dentro de `MapProvider`.
 
 ---
 
@@ -218,16 +273,23 @@ Con `speedFactor = 1.0` los aviones se mueven en tiempo real.
 ### Ciclo de vida de una simulación
 
 ```
-1. POST /api/v1/simulations { dataSource, solverTimingMode, optimizerMode, simStart, simEnd, speedFactor }
+1. POST /api/v1/simulations { dataSource, solverTimingMode, optimizerMode, simStart, simEnd,
+   speedFactor, collapseOnFailure }
    → { id, status: 'starting', simTime, simStart, simEnd }
+   → collapseOnFailure: true solo para el escenario "Colapso" (mismo endpoint que 5 días, no
+     hay un modo dedicado en el backend — ver sección 11)
    → Si 409: GET /simulations/mine → recupera sesión existente
    → socketService.connect(id)
 
-2. Al montar SimulationProvider (rehidratación al recargar):
+2. Al montar SimulationProvider (rehidratación al recargar / nueva pestaña / otro dispositivo):
    → GET /simulations/mine → sesión activa o 404
    → GET /simulations/{id}/snapshot → estado completo
    ⚠ El snapshot NO incluye 'id' — hay que inyectarlo: { ...snapshot, id: mine.id }
    → Vuelos con status DEPARTED → restoredFlights (animaciones al punto correcto)
+   ⚠ Este efecto depende de `isAuthenticated` — si dispara antes del login (dispositivo nuevo
+     sin sesión de browser) da 401 y debe reintentarse tras loguearse, si no la sesión activa
+     del usuario (visible desde otro dispositivo) nunca se restaura en este. Mismo patrón que
+     el fetch de `MapProvider`.
 
 3. WebSocket ws://{host}/api/v1/simulations/{id}/ws?token={jwt}
    Envelope: { "seq": 42, "type": "...", "simTime": "...", "payload": {} }
@@ -265,10 +327,10 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
 | POST | `/auth/refresh` | api.ts interceptor | Renovar JWT en 401 |
 | GET | `/data/airports` | hubService | Lista de aeropuertos/hubs |
 | GET | `/data/routes` | flightService | Lista de rutas |
-| GET | `/data/available-days` | simulationService | Fechas disponibles para simular |
+| GET | `/data/available-days` | hubService | Fechas disponibles para simular |
 | GET | `/operations` | operationsService | Sesión Día a Día (crea si no existe) |
-| POST | `/operations/orders` | operationsService | Carga manual de orden de maletas |
-| POST | `/simulations` | simulationService | Crear sesión (6 campos obligatorios) |
+| POST | `/operations/orders` | operationsService | Carga de orden de maletas — sin campo de hora, el backend usa `Instant.now()`. Usado tanto por el modo "Manual" (un pedido) como por la "Carga masiva" (loop del frontend, no hay endpoint bulk dedicado — ver sección 12) |
+| POST | `/simulations` | simulationService | Crear sesión (7 campos: incluye `collapseOnFailure`) |
 | GET | `/simulations/mine` | simulationService | Sesión activa del usuario |
 | GET | `/simulations/{id}` | simulationService | Estado de la sesión |
 | GET | `/simulations/{id}/snapshot` | simulationService | Estado completo (vuelos + maletas + aeropuertos) |
@@ -313,6 +375,7 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
 | `BAGGAGE_ASSIGNED` | `baggageId, route[]` |
 | `SHIPMENT_CREATED` | `shipmentId, baggageIds[], originIcao, destIcao, deadlineUtc` |
 | `SIM_STATUS` | `{ status }` — actualiza estado de sesión; si es `stopped/completed` cierra automáticamente |
+| `COLLAPSE_DETECTED` | `simTime, reason, baggageId, deadline, consecutiveCycles` — solo si la sesión se creó con `collapseOnFailure: true`; dispara el cuadro de finalización (ver sección 11) |
 
 ---
 
@@ -325,6 +388,7 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
   status: 'starting' | 'running' | 'paused' | 'completed' | 'stopped'
   startTimeAt: string           // simStart ISO (del backend)
   currentTimeAt: number         // horas transcurridas (actualizado por WS)
+  speedFactor: number           // leído del backend (data.speedFactor ?? 80)
   config: { speed: number; scenario: SimulationScenario }  // guardado localmente
   metrics: MonitoringMetrics    // inicializado vacío; MonitoringProvider lo actualiza
 }
@@ -352,6 +416,7 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
 | `lng` | `lon` |
 | `storageCapacity` | `capacity` |
 | `currentStorage` | no disponible en `/data/airports` (siempre 0; usar `/simulations/{id}/airports` para carga real) |
+| `gmtOffset` | `gmtOffset` — usado para conversión de hora local↔UTC (ver sección "Zona horaria" más abajo), no solo informativo |
 
 ### `Flight` (mapeado desde `RouteResponse`)
 
@@ -372,13 +437,22 @@ Base URL: `/api/v1` (proxy Vite → `http://localhost:8080` en desarrollo).
 Las fechas disponibles se obtienen de `GET /data/available-days` → `{ availableDates: ["YYYY-MM-DD", ...] }`.
 El selector de fecha usa solo estas fechas (select, no input libre).
 
-| Escenario | `simStart` | `simEnd` | `speedFactor` sugerido |
-|---|---|---|---|
-| `daily` | fecha elegida | fecha + 1 día | 480 |
-| `period_5d` | fecha elegida | fecha + 5 días | 480 |
-| `collapse` | fecha elegida | fecha + 30 días | 480 |
+| Escenario | `simStart` | `simEnd` | `speedFactor` | `collapseOnFailure` |
+|---|---|---|---|---|
+| `daily` (día a día) | ahora | — (sesión permanente, no usa este flujo) | 1.0 (tiempo real) | — |
+| `period_5d` | fecha/hora elegida | fecha + 5 días | 80 (hardcodeado) | `false` |
+| `collapse` | fecha/hora elegida | fecha + 30 días | 80 (hardcodeado) | `true` |
 
-Modo único funcional en el backend: `DB + REAL_TIME + ALNS_ONLY`.
+`collapse` **no es un modo aparte en el backend** — es el mismo `POST /simulations` que
+`period_5d`, con `collapseOnFailure: true` sumado al body. El backend detecta el colapso
+(deadline vencido o 5+ ciclos ALNS sin ruta viable) y publica `COLLAPSE_DETECTED` por WS,
+pero `simEnd` sigue siendo obligatorio — no hay "sin fin" real, los 30 días son margen para
+que el colapso ocurra antes de agotar el rango. Modo único funcional en el backend:
+`DB + REAL_TIME + ALNS_ONLY`.
+
+La fecha/hora de inicio que tipea el operario se interpreta en **su propia zona horaria**
+(resuelta por cuenta, ver sección "Zona horaria" más abajo) y se convierte a UTC antes de
+mandarla — el selector ya no está fijo a UTC.
 
 Solo se persiste en localStorage `simulation_config = { scenario, speed }` (no el ID de sesión, ese viene de `getMine`).
 
@@ -398,14 +472,23 @@ Solo se persiste en localStorage `simulation_config = { scenario, speed }` (no e
 
 - Mapa mundial idéntico al Dashboard pero en modo simulación manual.
 - **Panel de configuración** (sin sesión activa):
-  - Radio buttons: Operación Diaria, Periodo 5 Días, Colapso Operativo.
-  - Si se selecciona "Periodo 5 Días": datepicker con fechas disponibles del backend.
-  - Si se selecciona "Colapso Operativo": modal de advertencia antes de confirmar.
+  - Radio buttons: Periodo 5 Días, Colapso Operativo (no incluye Operación Diaria — esa es
+    siempre-activa vía `OperationsProvider`, no se crea desde acá).
+  - En **ambos** escenarios: `AvailableDayPicker` (fechas del dataset) + input de hora,
+    etiquetado con el `GMT±N` resuelto de la cuenta logueada — el operario tipea su propia
+    hora local, se convierte a UTC antes de mandarla.
+  - Si se selecciona "Colapso Operativo": modal de advertencia ("Prueba de Estrés") antes de
+    confirmar; al confirmar manda `collapseOnFailure: true`.
 - **Panel de control** (con sesión activa): Play/Pausa, Detener, tiempo simulado T+Xh, contador de vuelos activos.
 - **Log de eventos** colapsable: últimos 15 eventos WebSocket en tiempo real.
 - **Aviones animados**: ícono viaja a lo largo del arco al recibir `FLIGHT_DEPARTED`; se elimina al recibir `FLIGHT_ARRIVED`.
   - La animación usa un **reloj de animación (`animClock`) que se congela en pausa** y descuenta el tiempo en pausa al reanudar (sin salto). Sin esto los aviones seguían moviéndose con el reloj real aunque el backend estuviera pausado.
 - **Vista siempre montada y oculta por CSS** para preservar zoom/pan al cambiar de pestaña.
+- **Cuadro de finalización por colapso** (`CollapseSummaryModal`, renderizado desde `App.tsx`):
+  al recibir el evento WS `COLLAPSE_DETECTED`, muestra la razón (deadline vencido / sin ruta
+  viable) y un resumen de tiempo simulado transcurrido + tiempo real transcurrido hasta el
+  colapso (el tiempo real se calcula en el frontend, el backend no lo manda). Es adicional al
+  toast genérico de "Simulación completada", no lo reemplaza.
 
 #### Panel lateral de envíos (`SimulationInfoPanel`)
 
@@ -416,6 +499,30 @@ Solo se persiste en localStorage `simulation_config = { scenario, speed }` (no e
 #### Contador "SLA venc." (top bar, `App.tsx`)
 
 - Es **clicable**: abre `SlaBreachesModal` con la lista forense del **instante exacto** de cada incumplimiento (`getSlaBreaches`): hora del vencimiento, ubicación/estado de la maleta, si tenía ruta, ETA del plan y la causa clasificada (sin ruta / ruta lenta / etc.).
+
+### Carga de Órdenes (OrderUploadView)
+
+Dos modos, alternables con un selector arriba del formulario:
+
+- **Manual**: un pedido a la vez (origen + destino + cantidad). Se registra de inmediato vía
+  `POST /operations/orders` — sin campo de hora, `entryTime` lo pone el backend.
+- **Carga masiva**: sube un `.txt`, se parsea client-side (`lib/ordersFile.ts`) y se registra
+  contra el mismo endpoint que el modo manual, en un loop — **no hay endpoint bulk en el
+  backend**. El envío real vive en `BulkUploadProvider` (provider global, sobrevive cambios
+  de pestaña), con un pool de 8 workers en paralelo. Dos formatos por línea:
+  - 3 campos (`dest-cant-idCliente`) → sin hora, se registra ya.
+  - 7 campos (`id_pedido-aaaammdd-hh-mm-dest-cant-idCliente`) → trae hora, se interpreta como
+    **hora local del aeropuerto de origen** del archivo y se convierte a UTC. Cada fila se
+    registra respetando su horario relativo (tiempo real, sin factor de aceleración): si la
+    hora ya pasó al momento de subir, se descarta; si es futura, se espera exactamente a que
+    llegue.
+- Lista "Órdenes de esta sesión" muestra `entryTime` convertido a la hora de la cuenta
+  logueada (no la del origen del archivo, que puede diferir si el operario es admin).
+
+### Gestor de Aeropuertos (AirportManagerView)
+
+Tabla de solo lectura de los aeropuertos de la red (ciudad, continente, `gmtOffset`,
+capacidad). Permite editar la capacidad de almacén (`PUT /data/airports/{icao}/capacity`).
 
 ### Monitoreo (MonitoringView)
 
@@ -435,7 +542,7 @@ Búsqueda y rastreo de un envío por ID. Ver sección de pendientes — actualme
 | Mapa con los 30 aeropuertos reales del backend | ✅ Funciona |
 | 2.866 rutas de vuelo proyectadas en el mapa | ✅ Funciona |
 | Paneles flotantes colapsables | ✅ Funciona |
-| Selector de escenario (Diaria / 5 Días / Colapso) | ✅ Funciona |
+| Selector de escenario (5 Días / Colapso — Diaria es siempre-activa, no se elige acá) | ✅ Funciona |
 | Datepicker con fechas del backend | ✅ Funciona |
 | Modal de advertencia para escenario Colapso | ✅ Funciona |
 | Creación de sesión de simulación | ✅ Funciona |
@@ -455,6 +562,13 @@ Búsqueda y rastreo de un envío por ID. Ver sección de pendientes — actualme
 | Seleccionar avión/aeropuerto en mapa → abre panel lateral automáticamente | ✅ Funciona |
 | Ítem seleccionado se fija en primera línea del panel | ✅ Funciona |
 | Pestaña del panel se sincroniza con la selección del mapa | ✅ Funciona |
+| Carga manual de órdenes (un pedido a la vez) | ✅ Funciona |
+| Carga masiva de órdenes por archivo `.txt` (2 formatos, reparto en tiempo real) | ✅ Funciona |
+| Selector de fecha/hora de inicio también para escenario Colapso (antes solo 5 Días) | ✅ Funciona |
+| Cuadro de finalización al detectar colapso (`CollapseSummaryModal`, tiempo sim + real) | ✅ Funciona |
+| Rehidratación de sesión al loguear desde un dispositivo nuevo | ✅ Funciona |
+| Hora mostrada en pantalla y enviada al backend según el `gmtOffset` de la cuenta logueada | ✅ Funciona |
+| Gestor de aeropuertos: tabla + edición de capacidad | ✅ Funciona |
 
 ---
 
@@ -480,9 +594,12 @@ Búsqueda y rastreo de un envío por ID. Ver sección de pendientes — actualme
 - Endpoint correcto: `GET /api/v1/simulations/{sessionId}/baggage/{baggageId}` (requiere sesión activa).
 - El modelo `FullTrackingData` no coincide con `BaggageResponse` del backend; hay que adaptarlo.
 
-**`MapProvider` usa datos estáticos**
-- `MapProvider` proyecta constantes hardcodeadas de `infrastructure.ts`, no los datos dinámicos del backend.
-- Hacer que `MapProvider` consuma los datos del hook `useNetworkData` o un contexto compartido.
+**~~`MapProvider` usa datos estáticos~~ — ya no es cierto, corregido en el código antes de esta
+revisión de la doc.** `MapProvider` fetchea `hubService.getAll()`/`flightService.getAll()`
+(con retry, gateado a `isAuthenticated`) — las constantes hardcodeadas de `infrastructure.ts`
+(`HUBS`, `FLIGHTS`) existen pero son mock data, solo referenciadas por `SimulationView.tsx`
+y `DashboardView.tsx` (ver deuda técnica menor: ninguna de las dos está montada en `App.tsx`,
+son dead code).
 
 ### Importantes (degradan calidad)
 
@@ -495,7 +612,11 @@ Búsqueda y rastreo de un envío por ID. Ver sección de pendientes — actualme
 
 - `baggageService.ts` y `useBaggage.ts` son dead code. Eliminar o conectar a `GET /simulations/{id}/baggage/{baggageId}`.
 - `OPERATIONAL_EVENTS` en `domain.ts` define nombres de eventos que ya no coinciden con el WebSocket real. Reemplazar con los nombres reales (`FLIGHT_DEPARTED`, etc.).
-- `SimulationView` muestra `session.config.speed` que siempre es `1` (el backend no tiene velocidad configurable). Ocultar o eliminar ese campo.
+- **`views/SimulationView.tsx` y `views/DashboardView.tsx` son dead code completo** — ninguna
+  de las dos está importada/montada en `App.tsx` (la vista real de simulación es
+  `SimulationDashboardView.tsx`). Ambas siguen usando datos mock de `infrastructure.ts` y
+  quedaron desactualizadas (p. ej. `SimulationView` todavía etiqueta el picker de hora como
+  "(UTC)" fijo). Eliminar o, si se van a recuperar, ponerlas al día con el resto del código.
 - `Flight.duration` y `Flight.occupiedCapacity` siempre 0 — `GET /data/routes` no incluye esos campos.
 
 ---

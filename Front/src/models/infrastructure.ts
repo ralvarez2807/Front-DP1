@@ -7,6 +7,7 @@ export interface Hub {
   lng: number;
   storageCapacity: number;
   currentStorage: number;
+  gmtOffset: number;
   // Performance stabilization properties
   projectedX?: number;
   projectedY?: number;
@@ -25,18 +26,18 @@ export interface Flight {
 }
 
 export const HUBS: Hub[] = [
-  { id: 'LIM', name: 'Hub Lima', city: 'Lima', continent: 'America', lat: -12.0219, lng: -77.1143, storageCapacity: 600, currentStorage: 0 },
-  { id: 'NYC', name: 'Hub New York', city: 'New York', continent: 'America', lat: 40.6413, lng: -73.7781, storageCapacity: 800, currentStorage: 0 },
-  { id: 'SAO', name: 'Hub Sao Paulo', city: 'Sao Paulo', continent: 'America', lat: -23.4356, lng: -46.4731, storageCapacity: 700, currentStorage: 0 },
-  { id: 'MEX', name: 'Hub Mexico City', city: 'Mexico City', continent: 'America', lat: 19.4361, lng: -99.0719, storageCapacity: 650, currentStorage: 0 },
-  { id: 'MAD', name: 'Hub Madrid', city: 'Madrid', continent: 'Europe', lat: 40.4839, lng: -3.5680, storageCapacity: 750, currentStorage: 0 },
-  { id: 'PAR', name: 'Hub Paris', city: 'Paris', continent: 'Europe', lat: 49.0097, lng: 2.5479, storageCapacity: 800, currentStorage: 0 },
-  { id: 'LON', name: 'Hub London', city: 'London', continent: 'Europe', lat: 51.4700, lng: -0.4543, storageCapacity: 800, currentStorage: 0 },
-  { id: 'BER', name: 'Hub Berlin', city: 'Berlin', continent: 'Europe', lat: 52.3667, lng: 13.5033, storageCapacity: 700, currentStorage: 0 },
-  { id: 'HND', name: 'Hub Tokyo', city: 'Tokyo', continent: 'Asia', lat: 35.5494, lng: 139.7798, storageCapacity: 800, currentStorage: 0 },
-  { id: 'PEK', name: 'Hub Beijing', city: 'Beijing', continent: 'Asia', lat: 40.0799, lng: 116.6031, storageCapacity: 750, currentStorage: 0 },
-  { id: 'ICN', name: 'Hub Seoul', city: 'Seoul', continent: 'Asia', lat: 37.4602, lng: 126.4407, storageCapacity: 700, currentStorage: 0 },
-  { id: 'BKK', name: 'Hub Bangkok', city: 'Bangkok', continent: 'Asia', lat: 13.6900, lng: 100.7501, storageCapacity: 650, currentStorage: 0 },
+  { id: 'LIM', name: 'Hub Lima', city: 'Lima', continent: 'America', lat: -12.0219, lng: -77.1143, storageCapacity: 600, currentStorage: 0, gmtOffset: -5 },
+  { id: 'NYC', name: 'Hub New York', city: 'New York', continent: 'America', lat: 40.6413, lng: -73.7781, storageCapacity: 800, currentStorage: 0, gmtOffset: -5 },
+  { id: 'SAO', name: 'Hub Sao Paulo', city: 'Sao Paulo', continent: 'America', lat: -23.4356, lng: -46.4731, storageCapacity: 700, currentStorage: 0, gmtOffset: -3 },
+  { id: 'MEX', name: 'Hub Mexico City', city: 'Mexico City', continent: 'America', lat: 19.4361, lng: -99.0719, storageCapacity: 650, currentStorage: 0, gmtOffset: -6 },
+  { id: 'MAD', name: 'Hub Madrid', city: 'Madrid', continent: 'Europe', lat: 40.4839, lng: -3.5680, storageCapacity: 750, currentStorage: 0, gmtOffset: 1 },
+  { id: 'PAR', name: 'Hub Paris', city: 'Paris', continent: 'Europe', lat: 49.0097, lng: 2.5479, storageCapacity: 800, currentStorage: 0, gmtOffset: 1 },
+  { id: 'LON', name: 'Hub London', city: 'London', continent: 'Europe', lat: 51.4700, lng: -0.4543, storageCapacity: 800, currentStorage: 0, gmtOffset: 0 },
+  { id: 'BER', name: 'Hub Berlin', city: 'Berlin', continent: 'Europe', lat: 52.3667, lng: 13.5033, storageCapacity: 700, currentStorage: 0, gmtOffset: 1 },
+  { id: 'HND', name: 'Hub Tokyo', city: 'Tokyo', continent: 'Asia', lat: 35.5494, lng: 139.7798, storageCapacity: 800, currentStorage: 0, gmtOffset: 9 },
+  { id: 'PEK', name: 'Hub Beijing', city: 'Beijing', continent: 'Asia', lat: 40.0799, lng: 116.6031, storageCapacity: 750, currentStorage: 0, gmtOffset: 8 },
+  { id: 'ICN', name: 'Hub Seoul', city: 'Seoul', continent: 'Asia', lat: 37.4602, lng: 126.4407, storageCapacity: 700, currentStorage: 0, gmtOffset: 9 },
+  { id: 'BKK', name: 'Hub Bangkok', city: 'Bangkok', continent: 'Asia', lat: 13.6900, lng: 100.7501, storageCapacity: 650, currentStorage: 0, gmtOffset: 7 },
 ];
 
 export const FLIGHTS: Flight[] = [
