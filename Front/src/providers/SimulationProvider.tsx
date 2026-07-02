@@ -1,10 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { useSocket } from './SocketProvider';
+import { useAuthContext } from './AuthProvider';
 import { useToast } from './ToastProvider';
 import { socketService } from '../services/socket';
 import { simulationService } from '../services/simulationService';
 import { SimulationSession, OperationalEvent, CriticalPoint } from '../models/operational';
 import { SCENARIOS, SimulationScenario } from '../constants/domain';
+import { localInputToUtcIso } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const BACKEND_EVENTS = [
   'FLIGHT_SCHEDULED', 'FLIGHT_DEPARTED', 'FLIGHT_ARRIVED', 'FLIGHT_CANCELLED',
@@ -37,14 +40,15 @@ function toOperationalEvent(type: BackendEventType, payload: any, simTime?: stri
   };
 }
 
-// Construye rango en UTC puro para evitar offset de timezone del browser.
-// startTime es "HH:MM" en UTC.
+// startDate/startTime son hora LOCAL del usuario (según su ciudad) — se convierten
+// a UTC con localInputToUtcIso antes de construir el rango.
 function computeDateRange(
   scenario: SimulationScenario,
   startDate: string,
   startTime: string = '00:00',
+  gmtOffset: number = 0,
 ): { simStart: string; simEnd: string } {
-  const start = new Date(`${startDate}T${startTime}:00Z`);
+  const start = new Date(localInputToUtcIso(startDate, startTime, gmtOffset));
   const end   = new Date(start);
   if (scenario === SCENARIOS.PERIOD_5D) {
     end.setUTCDate(end.getUTCDate() + 5);
@@ -61,6 +65,16 @@ export interface DashboardMetrics {
   inFlight: number; slaBreaches: number; throughputPerHour: number;
 }
 
+export interface CollapseResult {
+  simTime: string;
+  reason: string;
+  baggageId: string;
+  deadline: string;
+  consecutiveCycles: number;
+  simElapsedMs: number;
+  realElapsedMs: number;
+}
+
 interface SimulationContextType {
   session: SimulationSession | null;
   events: OperationalEvent[];
@@ -73,6 +87,8 @@ interface SimulationContextType {
   lastSimUpdate: { simMs: number; realMs: number } | null;
   completionReport: any | null;
   clearCompletionReport: () => void;
+  collapseResult: CollapseResult | null;
+  clearCollapseResult: () => void;
   dashboardMetrics: DashboardMetrics | null;
   createSession: (scenario: SimulationScenario, startDate: string, startTime?: string) => Promise<void>;
   startSimulation: () => Promise<void>;
@@ -86,6 +102,8 @@ const SimulationContext = createContext<SimulationContextType | null>(null);
 export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const socket = useSocket();
   const { addToast } = useToast();
+  const { isAuthenticated, user } = useAuthContext();
+  const gmtOffset = useUserTimezone();
   const [session, setSession] = useState<SimulationSession | null>(null);
   const [events, setEvents] = useState<OperationalEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -96,6 +114,8 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [lastSimUpdate, setLastSimUpdate] = useState<{ simMs: number; realMs: number } | null>(null);
   const [completionReport, setCompletionReport] = useState<any | null>(null);
   const clearCompletionReport = useCallback(() => setCompletionReport(null), []);
+  const [collapseResult, setCollapseResult] = useState<CollapseResult | null>(null);
+  const clearCollapseResult = useCallback(() => setCollapseResult(null), []);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
 
   // ── Polling de métricas del dashboard ────────────────────────────────────
@@ -116,7 +136,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   }, [session?.id, session?.status]);
 
   // ── Rehidratación via GET /simulations/mine ───────────────────────────────
+  // Solo con el usuario autenticado: este endpoint requiere JWT. Si se dispara
+  // antes del login (p. ej. un dispositivo nuevo que aún no tiene sesión iniciada
+  // en el navegador) daba 401 y, como el efecto solo corría una vez al montar,
+  // nunca se reintentaba tras el login — la sesión activa del usuario en otro
+  // dispositivo quedaba sin restaurar para siempre. Mismo bug que ya se arregló
+  // en MapProvider; aquí se reintenta en cada login (isAuthenticated/user).
   useEffect(() => {
+    if (!isAuthenticated) return;
     simulationService.getMine()
       .then(mine => {
         if (!mine) return;
@@ -196,6 +223,30 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return unsub;
   }, [socket, addToast]);
 
+  // ── COLLAPSE_DETECTED: el backend detectó colapso operativo ──────────────
+  useEffect(() => {
+    if (!session?.startTimeAt) return;
+    const startTimeAt = session.startTimeAt;
+
+    const unsub = socket.on('COLLAPSE_DETECTED', ({ payload }: { payload: {
+      simTime: string; reason: string; baggageId: string; deadline: string; consecutiveCycles: number;
+    } }) => {
+      if (!payload?.simTime) return;
+      const simElapsedMs  = new Date(payload.simTime).getTime() - new Date(startTimeAt).getTime();
+      const realElapsedMs = Date.now() - (sessionStartedAt ?? Date.now());
+      setCollapseResult({
+        simTime:           payload.simTime,
+        reason:            payload.reason,
+        baggageId:         payload.baggageId,
+        deadline:          payload.deadline,
+        consecutiveCycles: payload.consecutiveCycles,
+        simElapsedMs,
+        realElapsedMs,
+      });
+    });
+    return unsub;
+  }, [socket, session?.startTimeAt, sessionStartedAt]);
+
   // ── Resync por gap en seq del WebSocket ───────────────────────────────────
   useEffect(() => {
     if (!session?.id) return;
@@ -272,7 +323,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     setIsLoading(true);
     const controller = new AbortController();
     try {
-      const { simStart, simEnd } = computeDateRange(scenario, startDate, startTime);
+      const { simStart, simEnd } = computeDateRange(scenario, startDate, startTime, gmtOffset);
       const config = { scenario, speed: 1 };
       localStorage.setItem('simulation_config', JSON.stringify(config));
       let newSession: SimulationSession;
@@ -297,6 +348,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setSession(newSession);
       setEvents([]);
       setError(null);
+      setCollapseResult(null);
       setSessionStartedAt(Date.now());
       socketService.connect(newSession.id);
       addToast(`Escenario ${scenario} inicializado correctamente`, 'success');
@@ -307,7 +359,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     } finally {
       setIsLoading(false);
     }
-  }, [addToast]);
+  }, [addToast, gmtOffset]);
 
   const startSimulation = useCallback(async () => {
     if (!session) return;
@@ -363,13 +415,15 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     lastSimUpdate,
     completionReport,
     clearCompletionReport,
+    collapseResult,
+    clearCollapseResult,
     dashboardMetrics,
     createSession,
     startSimulation,
     pauseSimulation,
     resetSimulation,
     injectFault,
-  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
+  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, collapseResult, clearCollapseResult, dashboardMetrics, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
 
   return (
     <SimulationContext.Provider value={value}>

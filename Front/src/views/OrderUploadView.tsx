@@ -12,18 +12,8 @@ import { useAuthContext } from '../providers/AuthProvider';
 import { useBulkUploadContext } from '../providers/BulkUploadProvider';
 import { parseEnviosFile } from '../lib/ordersFile';
 import { cn } from '../lib/utils';
-
-// Normaliza nombres de ciudad para comparar username↔ciudad: sin acentos ni mayúsculas.
-const normalizeCity = (s: string) =>
-  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').trim().toLowerCase();
-
-// ── Reloj ──────────────────────────────────────────────────────────────────
-const MONTHS_ES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
-function fmtDateTime(iso: string) {
-  const d = new Date(iso);
-  return `${String(d.getUTCDate()).padStart(2, '0')} ${MONTHS_ES[d.getUTCMonth()]} ` +
-    `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
-}
+import { normalizeCity, formatUserDayTime, formatGmtLabel } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 
 export const OrderUploadView: React.FC = () => {
@@ -47,6 +37,7 @@ export const OrderUploadView: React.FC = () => {
   // coincide con el nombre de una ciudad de la red, esa es su sede de origen (fija).
   // Si no (p. ej. el usuario admin), el operario elige el origen libremente.
   const { user } = useAuthContext();
+  const gmtOffset = useUserTimezone();
   const operatorAirport = useMemo(() => {
     if (!user?.name) return null;
     const uname = normalizeCity(user.name);
@@ -82,6 +73,7 @@ export const OrderUploadView: React.FC = () => {
 
   // ── Carga masiva por archivo ─────────────────────────────────────────────────
   const validIcaos = useMemo(() => new Set(hubs.map(h => h.id)), [hubs]);
+  const originGmtOffset = useMemo(() => hubs.find(h => h.id === origin)?.gmtOffset ?? 0, [hubs, origin]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [bulkFileName, setBulkFileName] = useState<string | null>(null);
   const [bulkRawText, setBulkRawText] = useState<string | null>(null);
@@ -121,15 +113,15 @@ export const OrderUploadView: React.FC = () => {
     setBulkFileName(file.name);
     const text = await file.text();
     setBulkRawText(text);
-    setBulkParsed(parseEnviosFile(text, validIcaos, origin));
+    setBulkParsed(parseEnviosFile(text, validIcaos, origin, originGmtOffset));
   };
 
   // Si el origen cambia (o terminan de cargar los aeropuertos) con un archivo ya
   // leído, se re-valida contra el nuevo origen sin pedir que vuelvan a subirlo.
   useEffect(() => {
     if (bulkRawText === null) return;
-    setBulkParsed(parseEnviosFile(bulkRawText, validIcaos, origin));
-  }, [origin, validIcaos, bulkRawText]);
+    setBulkParsed(parseEnviosFile(bulkRawText, validIcaos, origin, originGmtOffset));
+  }, [origin, validIcaos, originGmtOffset, bulkRawText]);
 
   const handleBulkSubmit = () => {
     if (!origin || bulkValidRows.length === 0) return;
@@ -529,7 +521,7 @@ export const OrderUploadView: React.FC = () => {
                     <ArrowRight className="w-3 h-3 text-slate-400" />
                     <span>{cityOf(o.destIcao)}</span>
                   </div>
-                  <p className="text-[10px] text-slate-400 font-mono mt-1">{fmtDateTime(o.entryTime)}</p>
+                  <p className="text-[10px] text-slate-400 font-mono mt-1">{formatUserDayTime(o.entryTime, gmtOffset)} ({formatGmtLabel(gmtOffset)})</p>
                 </div>
               ))}
             </div>

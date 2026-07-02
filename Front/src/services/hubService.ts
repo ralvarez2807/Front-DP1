@@ -13,6 +13,7 @@ export const hubService = {
       lng: a.lon,
       storageCapacity: a.capacity,
       currentStorage: 0,
+      gmtOffset: a.gmtOffset,
     }));
   },
 

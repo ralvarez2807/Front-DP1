@@ -2,14 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { simulationService, SlaBreach } from '../services/simulationService';
-
-function fmt(iso?: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  const MM = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  return `${String(d.getUTCDate()).padStart(2,'0')} ${MM[d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
-}
+import { formatUserDayTime } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const STATUS_CLS: Record<string, string> = {
   PENDING:   'bg-rose-100 text-rose-700',
@@ -22,6 +16,7 @@ const STATUS_CLS: Record<string, string> = {
  * subió, con el contexto del momento (dónde estaba la maleta, si tenía ruta y por qué falló).
  */
 export function SlaBreachesModal({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const gmtOffset = useUserTimezone();
   const [state, setState] = useState<{ status: 'loading' | 'error' } | { status: 'ready'; data: SlaBreach[] }>({ status: 'loading' });
 
   useEffect(() => {
@@ -64,7 +59,7 @@ export function SlaBreachesModal({ sessionId, onClose }: { sessionId: string; on
                     {b.statusAtBreach} @ {b.locationIcao}
                   </span>
                 </div>
-                <span className="text-[11px] text-red-600 font-bold">Venció: {fmt(b.breachTimeUtc)}</span>
+                <span className="text-[11px] text-red-600 font-bold">Venció: {formatUserDayTime(b.breachTimeUtc, gmtOffset)}</span>
               </div>
 
               <p className="text-[12px] text-slate-700 leading-relaxed">{b.cause}</p>
@@ -72,7 +67,7 @@ export function SlaBreachesModal({ sessionId, onClose }: { sessionId: string; on
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
                 <span>¿Tenía ruta completa?: <b className={b.hadCompleteRoute ? 'text-slate-700' : 'text-red-600'}>{b.hadCompleteRoute ? 'Sí' : 'No'}</b></span>
                 {b.plannedEtaUtc && (
-                  <span>ETA del plan: <b>{fmt(b.plannedEtaUtc)}</b> (<b className="text-red-600">+{b.plannedEtaLateMinutes} min</b>)</span>
+                  <span>ETA del plan: <b>{formatUserDayTime(b.plannedEtaUtc, gmtOffset)}</b> (<b className="text-red-600">+{b.plannedEtaLateMinutes} min</b>)</span>
                 )}
               </div>
 

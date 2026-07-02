@@ -1,3 +1,5 @@
+import { localToUtcMs } from './timezone';
+
 // ── Dos formatos soportados, detectados por línea según cantidad de campos ──
 //
 // Completo (7 campos, el oficial del caso — el que entrega el dataset del curso):
@@ -6,6 +8,10 @@
 //   Trae hora ⇒ se interpreta como reparto en el tiempo ("modo simulación"): cada
 //   pedido se registra respetando el espaciado relativo entre horas del archivo,
 //   no todos de golpe. Ver BulkUploadProvider.
+//   El "hh-mm" es hora LOCAL del aeropuerto de origen (no UTC) — igual que el
+//   backend interpreta sus propios archivos de envíos (TimeUtils.localToUtc con
+//   el gmtOffset del origen, ver ShipmentParser.java). Se convierte a UTC aquí
+//   restando el offset del origen antes de calcular timestampMs.
 //
 // Simplificado (3 campos, para carga manual/"modo counter" — se registra ya):
 //   "dest-cant-idCliente"
@@ -35,7 +41,7 @@ export interface ValidOrderRow {
   timestampMs?: number;
 }
 
-function parseFullLine(raw: string, lineNo: number, validIcaos: Set<string>, originIcao: string): ParsedOrderLine {
+function parseFullLine(raw: string, lineNo: number, validIcaos: Set<string>, originIcao: string, originGmtOffset: number): ParsedOrderLine {
   const parts = raw.split('-');
   const [idPedido, fecha, hh, mm, destRaw, qtyStr, clientId] = parts;
   if (!/^\d{8}$/.test(fecha)) return { lineNo, raw, error: `Fecha inválida: "${fecha}"` };
@@ -53,7 +59,7 @@ function parseFullLine(raw: string, lineNo: number, validIcaos: Set<string>, ori
     return { lineNo, raw, error: `Cantidad inválida: "${qtyStr}" (se esperan 3 dígitos, 001-999)` };
   }
   if (!/^\d{7}$/.test(clientId)) return { lineNo, raw, error: `IdCliente inválido: "${clientId}" (se esperan 7 dígitos)` };
-  const timestampMs = Date.UTC(year, month - 1, day, Number(hh), Number(mm));
+  const timestampMs = localToUtcMs(year, month, day, Number(hh), Number(mm), originGmtOffset);
   return { lineNo, raw, format: 'full', idPedido, dest, quantity, clientId, timestampMs };
 }
 
@@ -71,7 +77,7 @@ function parseSimpleLine(raw: string, lineNo: number, validIcaos: Set<string>, o
   return { lineNo, raw, format: 'simple', dest, quantity, clientId };
 }
 
-export function parseEnviosFile(text: string, validIcaos: Set<string>, originIcao: string): ParsedOrderLine[] {
+export function parseEnviosFile(text: string, validIcaos: Set<string>, originIcao: string, originGmtOffset: number = 0): ParsedOrderLine[] {
   return text
     .split(/\r?\n/)
     .map(l => l.trim())
@@ -79,7 +85,7 @@ export function parseEnviosFile(text: string, validIcaos: Set<string>, originIca
     .map((raw, i) => {
       const lineNo = i + 1;
       const fieldCount = raw.split('-').length;
-      if (fieldCount === 7) return parseFullLine(raw, lineNo, validIcaos, originIcao);
+      if (fieldCount === 7) return parseFullLine(raw, lineNo, validIcaos, originIcao, originGmtOffset);
       if (fieldCount === 3) return parseSimpleLine(raw, lineNo, validIcaos, originIcao);
       return {
         lineNo, raw,

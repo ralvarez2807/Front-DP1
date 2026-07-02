@@ -13,9 +13,12 @@ import { useSimulationContext } from './providers/SimulationProvider';
 import { useOperationsContext } from './providers/OperationsProvider';
 import { useBulkUploadContext } from './providers/BulkUploadProvider';
 import { SlaBreachesModal } from './components/SlaBreachesModal';
+import { CollapseSummaryModal } from './components/CollapseSummaryModal';
 
 import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
+import { formatUserDate, formatUserTime, formatUserDayTime, formatGmtLabel } from './lib/timezone';
+import { useUserTimezone } from './hooks/useUserTimezone';
 import { Auth } from './components/Auth';
 
 import { AirportManagerView }      from './views/AirportManagerView';
@@ -27,21 +30,14 @@ import { TrackingView }            from './views/TrackingView';
 
 type View = 'dashboard' | 'orders' | 'airports' | 'monitoring' | 'simulation' | 'tracking';
 
-// ── Formateadores de fecha ──────────────────────────────────────────────────
-const MONTHS_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-function formatDate(d: Date) {
-  return `${String(d.getDate()).padStart(2,'0')} ${MONTHS_ES[d.getMonth()]} ${d.getFullYear()}`;
-}
-function formatTime(d: Date) {
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-}
-
 // ── App ─────────────────────────────────────────────────────────────────────
 function AppContent() {
   const { user, logout, isAuthenticated, login } = useAuthContext();
+  const gmtOffset = useUserTimezone();
   const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
   const {
     session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics,
+    collapseResult, clearCollapseResult,
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
   } = useSimulationContext();
   const { metrics: opsMetrics, activeFlightCount, connected: opsConnected } = useOperationsContext();
@@ -209,10 +205,11 @@ function AppContent() {
               <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
               <div className="flex flex-col leading-none">
                 <span className="tabular-nums font-black text-slate-900 text-sm tracking-wide">
-                  {formatDate(displayDate)}
+                  {formatUserDate(displayDate, gmtOffset)}
                 </span>
                 <span className="tabular-nums font-mono text-slate-500 text-xs mt-0.5">
-                  {formatTime(displayDate)}
+                  {formatUserTime(displayDate, gmtOffset)}
+                  <span className="ml-1 text-slate-400 font-sans">({formatGmtLabel(gmtOffset)})</span>
                   {session && activeView === 'simulation' && <span className="ml-1.5 text-indigo-400 font-bold">(simulado)</span>}
                 </span>
               </div>
@@ -381,7 +378,7 @@ function AppContent() {
                             ? `${Math.floor(session.currentTimeAt / 24)}d ${session.currentTimeAt % 24}h`
                             : '0h'}
                           {' · '}
-                          {displayDate.toISOString().slice(0, 16).replace('T', ' ')} UTC
+                          {formatUserDayTime(displayDate, gmtOffset)} ({formatGmtLabel(gmtOffset)})
                         </span>
                       </div>
 
@@ -544,6 +541,11 @@ function AppContent() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── CUADRO DE FINALIZACIÓN: Colapso operativo detectado ──────────────── */}
+      {collapseResult && (
+        <CollapseSummaryModal result={collapseResult} onClose={clearCollapseResult} />
+      )}
 
       {/* ── NOTIFICACIÓN GLOBAL: Carga masiva de órdenes ─────────────────────── */}
       {/* Visible desde cualquier pestaña — el envío vive en BulkUploadProvider,

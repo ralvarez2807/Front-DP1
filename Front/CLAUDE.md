@@ -45,7 +45,7 @@ src/
     simulationService.ts  — CRUD de sesiones, snapshot, getMine, getShipmentDetail, getShipmentRoute
     hubService.ts         — aeropuertos, rutas, available-days
     operationsService.ts  — GET /operations, snapshot, dashboard y createOrder (día a día)
-    airportService.ts     — datos de aeropuerto para el gestor (incluye gmtOffset, solo informativo)
+    airportService.ts     — datos de aeropuerto para el gestor (incluye gmtOffset)
     orderService.ts       — (legacy, ver operationsService.createOrder para el flujo real)
     baggageService.ts     — consultas de maletas
     socket.ts             — WebSocket con tracking de seq y detección de gaps
@@ -66,11 +66,18 @@ src/
     AirportManagerView.tsx      — pestaña "Aeropuertos": tabla de gestión (solo lectura de datos)
   components/
     map/AnimatedPlane.tsx — avión animado a lo largo de un arco Bézier (usado solo por DailyOperationsView)
+    AvailableDayPicker.tsx — calendario de selección de fecha (fechas del dataset, reutilizado en config de simulación)
+    SlaBreachesModal.tsx  — foto forense del instante exacto de cada incumplimiento de SLA
+    CollapseSummaryModal.tsx — cuadro de finalización al detectar colapso (ver sección "Simulación hasta el colapso")
   hooks/
     useNetworkData.ts     — carga aeropuertos y rutas (solo cuando autenticado)
+    useUserTimezone.ts    — gmtOffset de la cuenta logueada (ver sección "Zona horaria")
   lib/
     ordersFile.ts         — parser de archivos de carga masiva (dos formatos, ver sección abajo)
+    timezone.ts           — formateo/conversión hora local↔UTC (ver sección "Zona horaria")
     utils.ts              — cn() (clsx + tailwind-merge)
+  models/
+    infrastructure.ts     — Hub (incluye gmtOffset), Flight
 ```
 
 ## Autenticación
@@ -86,12 +93,21 @@ src/
 `POST /simulations` — modo único funcional: `DB + REAL_TIME + ALNS_ONLY`. `speedFactor` hardcodeado a 80 (5 días / 1.5 h real).
 - Si devuelve `409` (ya hay sesión activa), el provider recupera la sesión existente vía `getMine`
 
-### Rehidratación al recargar / nueva pestaña
+### Rehidratación al recargar / nueva pestaña / otro dispositivo
 Al montar `SimulationProvider`:
 1. Llama `GET /simulations/mine` → devuelve sesión activa del usuario o 404
 2. Si hay sesión, llama `GET /simulations/:id/snapshot` para el estado completo
 3. **Importante:** el snapshot no incluye `id` — hay que inyectar `mine.id` manualmente: `{ ...snapshot, id: mine.id }`
 4. Extrae los vuelos con `status === 'DEPARTED'` (no `'IN_FLIGHT'`) del snapshot y los pone en `restoredFlights` para que la vista los dibuje con la animación en el punto correcto
+
+> **Bug corregido: la sesión no se restauraba en un dispositivo nuevo.** Este efecto corría
+> con `useEffect(..., [])` — una sola vez al montar, sin depender de `isAuthenticated`. En un
+> dispositivo/navegador donde el usuario aún no había logueado, el efecto disparaba
+> `GET /simulations/mine` **antes** del login → 401 silencioso → como las deps eran `[]`,
+> nunca se reintentaba tras loguearse. La sesión (que sí existía y corría bien en el backend,
+> visible desde el otro dispositivo) se quedaba en `null` para siempre ahí. Mismo patrón de
+> bug que ya estaba documentado y arreglado en `MapProvider` (ver "Datos de red" más abajo).
+> Arreglado: el efecto ahora depende de `[isAuthenticated]` y se reintenta en cada login.
 
 ### Estado de sesión
 El backend devuelve `status` en minúsculas: `starting | running | paused | completed | stopped`.
@@ -105,6 +121,39 @@ El tipo `SimulationSession.status` refleja exactamente estos valores.
 Corre cada 4s para todos los estados activos (`starting | running | paused`).
 Si el polling detecta `stopped | completed` o un 404 → cierra la sesión automáticamente.
 
+## Simulación hasta el colapso
+
+`SCENARIOS.COLLAPSE` ("Operación hasta el Colapso") es una variante de la simulación
+normal, no un modo aparte en el backend:
+
+- Al crear la sesión, `simulationService.createSession` manda `collapseOnFailure: true`
+  en el body de `POST /simulations` (mismo endpoint que la sim de 5 días). El backend activa
+  su `CollapseDetector` (deadline vencido o 5+ ciclos ALNS sin ruta viable) y, si detecta
+  colapso, publica el evento WS `COLLAPSE_DETECTED` y detiene la sesión (termina en
+  `status: COMPLETED`, igual que un fin normal por `simEnd` — no hay status distinto para
+  "colapsado").
+- `computeDateRange` (en `SimulationProvider`) le da `simEnd = simStart + 30 días` (vs. +5
+  para el escenario normal) — el backend **no soporta un rango sin fin**, `simEnd` sigue
+  siendo obligatorio; los 30 días son margen para que el colapso ocurra antes de agotar el
+  dataset.
+- El selector de fecha/hora de inicio (`AvailableDayPicker` + input de hora, en
+  `SimulationDashboardView`) se muestra igual que para el escenario de 5 días — antes solo
+  aparecía para `PERIOD_5D` y colapso usaba un default silencioso, ahora el usuario elige la
+  fecha en ambos casos.
+- Antes de confirmar, se muestra un modal de advertencia ("Prueba de Estrés") — `confirmCollapse`
+  llama a `createSession` recién al confirmar.
+
+### Cuadro de finalización (`CollapseSummaryModal`)
+`SimulationProvider` escucha `COLLAPSE_DETECTED` (payload: `simTime, reason, baggageId,
+deadline, consecutiveCycles`) y calcula, en el momento en que llega el evento:
+- `simElapsedMs` = `simTime` del evento − `session.startTimeAt` (tiempo simulado hasta el colapso)
+- `realElapsedMs` = `Date.now()` − `sessionStartedAt` (tiempo real que tardó, calculado en el
+  frontend — **el backend no manda tiempo real transcurrido**, solo `simTime`)
+
+Se guarda en `collapseResult` (contexto), y `App.tsx` renderiza `CollapseSummaryModal` a
+nivel de app cuando no es `null` — un cuadro aparte del toast genérico de "Simulación
+completada" (`completionReport`), que sigue disparándose igual para cualquier fin de sesión.
+
 ## WebSocket
 
 Envelope: `{ "seq": 42, "type": "BAGGAGE_DEPARTED", "simTime": "...", "payload": {} }`
@@ -113,6 +162,7 @@ Envelope: `{ "seq": 42, "type": "BAGGAGE_DEPARTED", "simTime": "...", "payload":
 - Duplicados (`seq <= lastSeq`) se descartan silenciosamente
 - `lastSeq` se resetea a `-1` en cada `connect()` (nueva sesión), pero NO en reconexiones automáticas (para detectar gaps tras caída)
 - Evento especial `SIM_STATUS { status }` actualiza el estado de la sesión; si es `stopped/completed` cierra automáticamente
+- Evento especial `COLLAPSE_DETECTED { simTime, reason, baggageId, deadline, consecutiveCycles }` — solo si la sesión se creó con `collapseOnFailure: true` (ver "Simulación hasta el colapso")
 
 ## Mapa SVG interactivo (SimulationDashboardView y DailyOperationsView)
 
@@ -298,9 +348,18 @@ el usuario:
   **Hasta ese instante la fila no existe para el backend en ningún sentido** — no ocupa
   almacenamiento, no aparece en ningún vuelo — porque literalmente no se ha hecho el POST
   todavía.
-- Hora del archivo se interpreta en **UTC**, igual que el resto del sistema. No hay
-  conversión de huso horario por ciudad (el campo `gmtOffset` de `airportService` es
-  puramente informativo, solo se usa para mostrarlo en la tabla de `AirportManagerView`).
+- Hora del archivo (`hh-mm`) se interpreta como **hora local del aeropuerto de origen**
+  del archivo (todo el archivo comparte un único origen, el que elige el operario en el
+  selector) — igual que el backend interpreta sus propios archivos de envíos
+  (`TimeUtils.localToUtc` con el `gmtOffset` del origen, ver `ShipmentParser.java` en el
+  backend). `ordersFile.ts` (`parseFullLine`) convierte a UTC restando el offset:
+  `timestampMs = Date.UTC(...) - originGmtOffset * 3_600_000`. El `gmtOffset` ya no es
+  puramente informativo — `hubService.getAll()` lo expone en `Hub.gmtOffset` (antes lo
+  descartaba al mapear desde `/data/airports`) y `OrderUploadView` lo resuelve del
+  aeropuerto de origen seleccionado para pasarlo a `parseEnviosFile`.
+- La carga manual (un pedido a la vez, `POST /operations/orders`) no envía ninguna hora —
+  el backend usa `Instant.now()` del servidor como `entryTime`. No hay campo de hora que
+  convertir ahí.
 
 ### Arquitectura: `providers/BulkUploadProvider.tsx`
 - Vive montado en `main.tsx` a nivel de app (no en `OrderUploadView`) — así el trabajo
@@ -358,4 +417,22 @@ Se limpia al detener la simulación.
 - **Fuente de verdad para "En vuelo":** `activePlanes` (aviones con animación activa en el mapa), no el estado del API. El API puede anticipar `DEPARTED` para vuelos que aún no han salido.
 - **baggageId format:** `"{shipmentId}-B{n}"` → extraer shipmentId con `.replace(/-B\d+$/, '')`.
 - **flightId format:** `"SKBO-SEQM-19:00-20260103"` → scheduleId (sin fecha) con `.replace(/-\d{8}$/, '')`.
-- **Zona horaria:** todas las fechas del backend son UTC. Los formateadores de reloj usan métodos `getUTC*`.
+- **Zona horaria:** todas las fechas del backend son UTC, pero el frontend **no muestra UTC crudo** —
+  convierte cada hora a la zona horaria de la cuenta logueada. `src/hooks/useUserTimezone.ts` resuelve
+  un `gmtOffset` comparando `user.name` contra el nombre de una ciudad de la red (mismo mecanismo que
+  ya usaba `operatorAirport` en `OrderUploadView.tsx`); si no coincide con ninguna (p. ej. `admin`), es
+  `0` (UTC+0). `src/lib/timezone.ts` centraliza:
+  - Formateadores de **salida**: `formatUserTime`/`formatUserDayTime`/`formatUserDate` — desplazan el
+    epoch ms por `gmtOffset*3_600_000` y leen los campos con `getUTC*()` sobre ese `Date` desplazado
+    (así se evita que el timezone propio del browser interfiera). Usados en el reloj de cabecera
+    (`App.tsx`), `SlaBreachesModal`, `SimulationInfoPanel` (vuelos/maletas/diagnóstico) y la lista de
+    órdenes recientes (`OrderUploadView`).
+  - Conversores de **entrada**: `localToUtcMs`/`localInputToUtcIso` — toda hora que tipea el usuario se
+    interpreta en su propia zona y se convierte a UTC antes de mandarla al backend. Usado por
+    `ordersFile.ts` (hora `hh-mm` del archivo de carga masiva, respecto al **aeropuerto de origen**
+    elegido para ese archivo, no necesariamente el del usuario si es admin) y por
+    `SimulationProvider.computeDateRange` (selector "Hora de inicio" al arrancar una simulación — ya
+    no está fijo a UTC, la etiqueta muestra el `GMT±N` resuelto del usuario).
+  - El reloj de cabecera (`App.tsx`, compartido entre Día a Día y Simulación) muestra el `GMT±N`
+    entre paréntesis junto a la hora (`formatGmtLabel`), para dejar explícito que es hora local de
+    la cuenta y no UTC.

@@ -6,6 +6,8 @@ import {
   simulationService, SimAirport, SimFlight, SimShipment, AirportBaggage, FlightBaggage,
   ShipmentDiagnostics,
 } from '../services/simulationService';
+import { formatUserDayTime } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 // ── Tipos de pestaña ─────────────────────────────────────────────────────────
 type Tab = 'airports' | 'flights' | 'packages';
@@ -80,19 +82,8 @@ function shipmentStatus(
   return     { label: 'PENDIENTE',  cls: 'bg-slate-100 text-slate-500',     dot: '#94a3b8' };
 }
 
-function fmtTime(iso?: string): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
-}
-
-function fmtDayTime(iso?: string): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  const MM = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  return `${String(d.getUTCDate()).padStart(2, '0')} ${MM[d.getUTCMonth()]} ${fmtTime(iso)}`;
+function fmtDayTime(iso: string | undefined | null, gmtOffset: number): string {
+  return iso ? formatUserDayTime(iso, gmtOffset) : '—';
 }
 
 // ── Controles de filtro reutilizables ────────────────────────────────────────
@@ -177,6 +168,7 @@ function BaggagePanel({ state, kind }: {
   state: LoadState<AirportBaggage | FlightBaggage> | undefined;
   kind: 'airport' | 'flight';
 }) {
+  const gmtOffset = useUserTimezone();
   if (!state || state.status === 'loading') return <SubInfo>Cargando maletas…</SubInfo>;
   if (state.status === 'error') return <SubInfo>No se pudieron cargar las maletas</SubInfo>;
   const items = state.data;
@@ -198,7 +190,7 @@ function BaggagePanel({ state, kind }: {
               <div className="text-right text-[10px] font-mono leading-tight">
                 {kind === 'airport' && nextFlight
                   ? <span className="text-indigo-500">✈ {String(nextFlight).replace(/-\d{8}$/, '')}</span>
-                  : <span className="text-slate-400" title="Fecha límite de entrega">{fmtDayTime(b.deadlineUtc)}</span>}
+                  : <span className="text-slate-400" title="Fecha límite de entrega">{fmtDayTime(b.deadlineUtc, gmtOffset)}</span>}
               </div>
             </div>
           );
@@ -242,17 +234,14 @@ const VERDICT_META: Record<string, { label: string; cls: string }> = {
   ON_TRACK:            { label: 'EN CAMINO',              cls: 'bg-slate-100 text-slate-600' },
 };
 
-function fmtDiagTime(iso?: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  const MM = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  return `${String(d.getUTCDate()).padStart(2,'0')} ${MM[d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+function fmtDiagTime(iso: string | undefined | null, gmtOffset: number): string {
+  return iso ? formatUserDayTime(iso, gmtOffset) : '—';
 }
 
 function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
   sessionId: string; shipmentId: string; onClose: () => void;
 }) {
+  const gmtOffset = useUserTimezone();
   const [state, setState] = useState<LoadState<ShipmentDiagnostics>>({ status: 'loading' });
 
   useEffect(() => {
@@ -286,8 +275,8 @@ function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
             <>
               <div className="text-[12px] text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
                 <span><b className="font-mono">{diag.originIcao}</b> → <b className="font-mono">{diag.destIcao}</b></span>
-                <span>Deadline: <b>{fmtDiagTime(diag.deadlineUtc)}</b></span>
-                <span>Ahora (sim): <b>{fmtDiagTime(diag.simNowUtc)}</b></span>
+                <span>Deadline: <b>{fmtDiagTime(diag.deadlineUtc, gmtOffset)}</b></span>
+                <span>Ahora (sim): <b>{fmtDiagTime(diag.simNowUtc, gmtOffset)}</b></span>
               </div>
 
               {diag.baggages.length === 0 && (
@@ -308,11 +297,11 @@ function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-600">
                       <span>Estado: <b>{b.status}</b></span>
                       <span>Ubicación: <b className="font-mono">{b.currentIcao}</b></span>
-                      <span>Disponible desde: <b>{fmtDiagTime(b.availableFromUtc)}</b></span>
+                      <span>Disponible desde: <b>{fmtDiagTime(b.availableFromUtc, gmtOffset)}</b></span>
                       <span>Margen al deadline: <b className={b.minutesToDeadline < 0 ? 'text-red-600' : ''}>{b.minutesToDeadline} min</b></span>
                       {b.bestEffortArrivalUtc && (
                         <>
-                          <span>Mejor llegada posible: <b>{fmtDiagTime(b.bestEffortArrivalUtc)}</b> ({b.bestEffortHops} vuelo[s])</span>
+                          <span>Mejor llegada posible: <b>{fmtDiagTime(b.bestEffortArrivalUtc, gmtOffset)}</b> ({b.bestEffortHops} vuelo[s])</span>
                           <span>{b.bestEffortLateMinutes > 0
                             ? <>Retraso mínimo: <b className="text-red-600">{b.bestEffortLateMinutes} min</b></>
                             : <>Holgura: <b className="text-emerald-600">{-b.bestEffortLateMinutes} min</b></>}</span>
@@ -329,7 +318,7 @@ function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
                           {b.directFlights.slice(0, 8).map(f => (
                             <div key={f.flightId} className="flex items-center justify-between text-[11px] border-b border-slate-50 py-1">
                               <span className="font-mono text-slate-600">{f.flightId}</span>
-                              <span className="text-slate-500">{fmtDiagTime(f.depUtc)}→{fmtDiagTime(f.arrUtc)} · cap {f.remainingCapacity}</span>
+                              <span className="text-slate-500">{fmtDiagTime(f.depUtc, gmtOffset)}→{fmtDiagTime(f.arrUtc, gmtOffset)} · cap {f.remainingCapacity}</span>
                               <span className={cn('font-bold', f.usable ? 'text-emerald-600' : 'text-red-500')}>{f.usable ? 'OK' : f.reason}</span>
                             </div>
                           ))}
@@ -352,6 +341,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   selectedAirportId, selectedFlightId, selectedShipmentId, onSelectAirport, onSelectFlight, onSelectShipment,
   activeTab: controlledTab, onTabChange, currentSimMs, activeFlightIds, shipmentsInFlight,
 }) => {
+  const gmtOffset = useUserTimezone();
   const [localTab, setLocalTab] = useState<Tab>('airports');
   const tab = controlledTab ?? localTab;
   const setTab = (t: Tab) => { setLocalTab(t); onTabChange?.(t); };
@@ -760,8 +750,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               <Bar pct={f.occupancyPct} color={color} />
                             </div>
                             <div className="text-right leading-tight">
-                              <p className="text-[10px] font-mono text-slate-400">{fmtDayTime(f.depTime)} sal</p>
-                              <p className="text-[10px] font-mono text-slate-500">{fmtDayTime(f.arrTime)} lle</p>
+                              <p className="text-[10px] font-mono text-slate-400">{fmtDayTime(f.depTime, gmtOffset)} sal</p>
+                              <p className="text-[10px] font-mono text-slate-500">{fmtDayTime(f.arrTime, gmtOffset)} lle</p>
                             </div>
                           </button>
                           {selected && <BaggagePanel state={flightBags[f.flightId]} kind="flight" />}
@@ -855,7 +845,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               <span className="text-base font-black font-mono leading-none text-slate-700">{s.delivered}/{s.totalBaggages}</span>
                             </div>
                             <Bar pct={pct} color={st.dot} />
-                            <p className="text-[9px] font-mono text-slate-400 mt-0.5">{fmtDayTime(s.deadlineUtc)}</p>
+                            <p className="text-[9px] font-mono text-slate-400 mt-0.5">{fmtDayTime(s.deadlineUtc, gmtOffset)}</p>
                           </div>
                         </div>
                       );

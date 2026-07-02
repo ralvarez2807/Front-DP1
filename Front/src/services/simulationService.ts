@@ -1,6 +1,6 @@
 import api from './api';
 import { SimulationSession } from '../models/operational';
-import { SimulationScenario } from '../constants/domain';
+import { SimulationScenario, SCENARIOS } from '../constants/domain';
 
 // ── Tipos de vistas en vivo de la simulación (compartidos con la UI) ─────────
 export interface SimAirport {
@@ -162,6 +162,7 @@ export const simulationService = {
       simStart,
       simEnd,
       speedFactor:      SPEED_FACTOR,
+      collapseOnFailure: config.scenario === SCENARIOS.COLLAPSE,
     };
     const response = await api.post('/simulations', body, { signal });
     return mapSession(response.data, config);

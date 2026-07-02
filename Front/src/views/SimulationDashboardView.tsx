@@ -15,6 +15,8 @@ import { simulationService, SimAirport, SimFlight, SimShipment, ShipmentRouteLeg
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
+import { localTodayString, formatGmtLabel } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 // Fallback de velocidad si el backend aún no respondió con su speedFactor real.
 const SIM_SPEED_FALLBACK = 80;
@@ -677,6 +679,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   }, [session]);
 
   // ── Escenario ────────────────────────────────────────────────────────────
+  const gmtOffset = useUserTimezone();
   const [selectedScenario, setSelectedScenario] = useState<SimulationScenario>(SCENARIOS.PERIOD_5D);
   const [startDate, setStartDate] = useState('');
   const [startTime, setStartTime] = useState('00:00');
@@ -690,7 +693,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         const sorted = [...days].sort();
         setAvailableDays(sorted);
         if (sorted.length > 0) {
-          const today = new Date().toISOString().slice(0, 10);
+          const today = localTodayString(gmtOffset);
           const best = sorted.includes(today)
             ? today
             : sorted.filter(d => d <= today).at(-1) ?? sorted[0];
@@ -699,7 +702,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       })
       .catch(() => {});
     return () => controller.abort();
-  }, []);
+  }, [gmtOffset]);
 
   const handleCreate = useCallback(async () => {
     if (selectedScenario === SCENARIOS.COLLAPSE) {
@@ -1610,9 +1613,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   ))}
                 </div>
 
-                {selectedScenario === SCENARIOS.PERIOD_5D && (
+                {(selectedScenario === SCENARIOS.PERIOD_5D || selectedScenario === SCENARIOS.COLLAPSE) && (
                   <div className="space-y-2">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 block">
+                    <label className={cn(
+                      'text-[10px] font-bold uppercase tracking-widest block',
+                      selectedScenario === SCENARIOS.COLLAPSE ? 'text-rose-600' : 'text-indigo-600'
+                    )}>
                       Fecha de inicio
                     </label>
                     {availableDays.length === 0 ? (
@@ -1628,9 +1634,15 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                       />
                     )}
                     <div className="flex items-center gap-2">
-                      <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                      <label className="text-[10px] font-bold uppercase tracking-widest text-indigo-600">
-                        Hora de inicio (UTC)
+                      <Clock className={cn(
+                        'w-3.5 h-3.5 shrink-0',
+                        selectedScenario === SCENARIOS.COLLAPSE ? 'text-rose-400' : 'text-indigo-400'
+                      )} />
+                      <label className={cn(
+                        'text-[10px] font-bold uppercase tracking-widest',
+                        selectedScenario === SCENARIOS.COLLAPSE ? 'text-rose-600' : 'text-indigo-600'
+                      )}>
+                        Hora de inicio ({formatGmtLabel(gmtOffset)})
                       </label>
                     </div>
                     <input
@@ -1638,14 +1650,19 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                       value={startTime}
                       onChange={e => setStartTime(e.target.value)}
                       disabled={isLoading}
-                      className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none focus:border-indigo-400"
+                      className={cn(
+                        'w-full bg-white border rounded-xl px-3 py-2 text-sm font-bold text-slate-900 outline-none',
+                        selectedScenario === SCENARIOS.COLLAPSE
+                          ? 'border-rose-200 focus:border-rose-400'
+                          : 'border-indigo-200 focus:border-indigo-400'
+                      )}
                     />
                   </div>
                 )}
 
                 <button
                   onClick={handleCreate}
-                  disabled={isLoading || (selectedScenario === SCENARIOS.PERIOD_5D && !startDate)}
+                  disabled={isLoading || ((selectedScenario === SCENARIOS.PERIOD_5D || selectedScenario === SCENARIOS.COLLAPSE) && !startDate)}
                   className={cn(
                     'w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-lg',
                     selectedScenario === SCENARIOS.COLLAPSE
