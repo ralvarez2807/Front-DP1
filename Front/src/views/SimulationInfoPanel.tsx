@@ -29,6 +29,7 @@ interface Props {
   shipments: SimShipment[];
   selectedAirportId: string | null;
   selectedFlightId: string | null;
+  selectedShipmentId?: string | null;
   onSelectAirport: (icao: string) => void;
   onSelectFlight: (flight: SimFlight) => void;
   onSelectShipment?: (shipment: SimShipment) => void;
@@ -348,7 +349,7 @@ function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
 
 export const SimulationInfoPanel: React.FC<Props> = ({
   sessionId, hasSession, airports, flights, shipments,
-  selectedAirportId, selectedFlightId, onSelectAirport, onSelectFlight, onSelectShipment,
+  selectedAirportId, selectedFlightId, selectedShipmentId, onSelectAirport, onSelectFlight, onSelectShipment,
   activeTab: controlledTab, onTabChange, currentSimMs, activeFlightIds, shipmentsInFlight,
 }) => {
   const [localTab, setLocalTab] = useState<Tab>('airports');
@@ -538,6 +539,15 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     return copy;
   }, [filteredFlights, selectedFlightId]);
 
+  const sortedShipments = useMemo(() => {
+    if (!selectedShipmentId) return filteredShipments;
+    const idx = filteredShipments.findIndex(s => s.shipmentId === selectedShipmentId);
+    if (idx <= 0) return filteredShipments;
+    const copy = [...filteredShipments];
+    copy.unshift(...copy.splice(idx, 1));
+    return copy;
+  }, [filteredShipments, selectedShipmentId]);
+
   // Scroll al inicio cuando cambia el ítem seleccionado (el seleccionado está en la cima)
   useEffect(() => {
     if (selectedAirportId && tab === 'airports' && listRef.current) {
@@ -550,6 +560,12 @@ export const SimulationInfoPanel: React.FC<Props> = ({
       listRef.current.scrollTop = 0;
     }
   }, [selectedFlightId, tab]);
+
+  useEffect(() => {
+    if (selectedShipmentId && tab === 'packages' && listRef.current) {
+      listRef.current.scrollTop = 0;
+    }
+  }, [selectedShipmentId, tab]);
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode; count: number }[] = [
     { id: 'airports', label: 'Aeropuertos', icon: <Building2 className="w-4 h-4" />, count: airports.length },
@@ -787,24 +803,25 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <ColHead>Estado</ColHead>
                 <ColHead className="text-right">Bultos / Deadline</ColHead>
               </div>
-              {filteredShipments.length === 0
+              {sortedShipments.length === 0
                 ? <EmptyState hasSession={hasSession} kind="packages" />
                 : (
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                    {filteredShipments.slice(0, MAX_ROWS).map(s => {
+                  <div ref={listRef} className="flex-1 overflow-y-auto custom-scrollbar">
+                    {sortedShipments.slice(0, MAX_ROWS).map(s => {
                       const st = shipmentStatus(s, shipmentsInFlight);
                       const pct = s.totalBaggages > 0 ? (s.delivered / s.totalBaggages) * 100 : 0;
                       // Hay ruta dibujable salvo sin plan (PENDIENTE) o ya cerrado
                       // (ENTREGADO: el detalle no expone los tramos ya recorridos).
                       const hasRoute = st.label !== 'PENDIENTE' && st.label !== 'ENTREGADO';
                       const clickable = hasRoute && !!onSelectShipment;
+                      const selected = selectedShipmentId === s.shipmentId;
                       return (
                         <div
                           key={s.shipmentId}
                           onClick={clickable ? () => onSelectShipment!(s) : undefined}
                           className={cn(
-                            'w-full grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 items-center px-4 py-3 text-left border-b border-slate-50',
-                            clickable && 'cursor-pointer hover:bg-indigo-50/40 transition-colors',
+                            'w-full grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 items-center px-4 py-3 text-left border-b border-slate-50 transition-colors',
+                            selected ? 'bg-indigo-50' : clickable && 'cursor-pointer hover:bg-indigo-50/40',
                           )}
                           title={clickable ? 'Click para ver la ruta en el mapa' : undefined}
                         >

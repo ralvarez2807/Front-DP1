@@ -8,7 +8,7 @@ import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider'
 import { AnimatedPlane } from '../components/map/AnimatedPlane';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { simulationService } from '../services/simulationService';
-import type { SimAirport, SimFlight, SimShipment } from '../services/simulationService';
+import type { SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { cn } from '../lib/utils';
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
@@ -97,6 +97,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   // ── Estado de selección ──────────────────────────────────────────────────
   const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
   const [selectedFlightId,  setSelectedFlightId]  = useState<string | null>(null);
+  // Envío seleccionado (pestaña Paquetes) y su ruta dibujada en el mapa — mismo
+  // comportamiento que en SimulationDashboardView, ver focusOnShipment más abajo.
+  const [selectedShipmentId, setSelectedShipmentId] = useState<string | null>(null);
+  const [routeOverlay, setRouteOverlay] =
+    useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
 
   // ── Tooltips ─────────────────────────────────────────────────────────────
@@ -164,6 +169,9 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   // ── Zoom hacia hub seleccionado ───────────────────────────────────────────
   const focusOnAirport = useCallback((icao: string) => {
     setSelectedAirportId(prev => prev === icao ? null : icao);
+    // Selección directa de aeropuerto: deja de tener sentido cualquier envío fijado.
+    setSelectedShipmentId(null);
+    setRouteOverlay(null);
     const hub = projectedHubs.find(h => h.id === icao);
     if (!hub) return;
     const targetK = 5;
@@ -171,12 +179,14 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
   }, [projectedHubs, clamp]);
 
-  // ── Zoom hacia avión seleccionado ─────────────────────────────────────────
-  const focusOnPlane = useCallback((plane: OpsPlane) => {
-    setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId);
+  // Selecciona un vuelo sin togglear — usada por focusOnPlane y por la selección de
+  // envíos "en vuelo" (que siempre debe seleccionar, nunca deseleccionar por rebote
+  // si ese vuelo ya estaba elegido por otra vía).
+  const selectPlaneFlight = useCallback((flightId: string, fromIcao: string, toIcao: string) => {
+    setSelectedFlightId(flightId);
     setInfoPanelTab('flights');
-    const origin = projectedHubs.find(h => h.id === plane.fromIcao);
-    const dest   = projectedHubs.find(h => h.id === plane.toIcao);
+    const origin = projectedHubs.find(h => h.id === fromIcao);
+    const dest   = projectedHubs.find(h => h.id === toIcao);
     if (!origin || !dest) return;
     const cx = (origin.projectedX! + dest.projectedX!) / 2;
     const cy = (origin.projectedY! + dest.projectedY!) / 2;
@@ -184,6 +194,19 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
     setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
   }, [projectedHubs, clamp]);
+
+  // ── Zoom hacia avión seleccionado (clic directo en el mapa/panel) ─────────
+  const focusOnPlane = useCallback((plane: OpsPlane) => {
+    if (plane.flightId === selectedFlightId) {
+      setSelectedFlightId(null);
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      return;
+    }
+    setSelectedShipmentId(null);
+    setRouteOverlay(null);
+    selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
+  }, [selectedFlightId, selectPlaneFlight]);
 
   // ── Rutas deduplicadas ─────────────────────────────────────────────────────
   const uniqueRoutes = useMemo(() => {
@@ -211,10 +234,6 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   const hubIndex = useMemo(() => new Map(projectedHubs.map(h => [h.id, h])), [projectedHubs]);
 
-  // ── Ruta / hub del vuelo seleccionado ─────────────────────────────────────
-  const selectedPlane  = useMemo(() => planes.find(p => p.flightId === selectedFlightId) ?? null, [planes, selectedFlightId]);
-  const selectedFlight = useMemo(() => selectedPlane ? toSimFlight(selectedPlane) : null, [selectedPlane]);
-
   const INACTIVE_OPACITY = selectedFlightId || selectedAirportId ? 0.04 : 0.08;
 
   // ── Datos convertidos para SimulationInfoPanel ────────────────────────────
@@ -226,12 +245,99 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     planes.map(toSimFlight),
   [planes]);
 
+  // ── Ruta / hub del vuelo seleccionado ─────────────────────────────────────
+  // Si el vuelo seleccionado está en el aire, sale de `planes` (fuente de verdad
+  // en vivo). Si es un vuelo asignado pero aún no despega (seleccionado vía un
+  // envío ASIGNADO), no hay avión activo — se resuelve contra la lista de vuelos
+  // del API para que la ruta/hubs igual se resalten en el mapa.
+  const selectedPlane = useMemo(() => planes.find(p => p.flightId === selectedFlightId) ?? null, [planes, selectedFlightId]);
+  const selectedFlight = useMemo(() => {
+    if (selectedPlane) return toSimFlight(selectedPlane);
+    if (!selectedFlightId) return null;
+    const candidates = opsAllFlights.length > 0 ? opsAllFlights : opsFlightList;
+    return candidates.find(f => f.flightId === selectedFlightId) ?? null;
+  }, [selectedPlane, selectedFlightId, opsAllFlights, opsFlightList]);
+
   // Todos los flightIds de planes son "activos" (están en el mapa)
   const activeFlightIds = useMemo(() => new Set(planes.map(p => p.flightId)), [planes]);
 
   // Color de hub por ocupación
   const hubColor = (pct: number, empty: boolean) =>
     empty ? '#94a3b8' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+
+  // Encuadra la cámara para que entren todos los aeropuertos dados.
+  const fitToHubs = useCallback((icaos: string[]) => {
+    const hubs = icaos
+      .map(ic => projectedHubs.find(h => h.id === ic))
+      .filter((h): h is typeof projectedHubs[0] => !!h);
+    if (hubs.length === 0) return;
+    const xs = hubs.map(h => h.projectedX!);
+    const ys = hubs.map(h => h.projectedY!);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const pad = 120;
+    const kX = MAP_VIEWBOX.width  / (maxX - minX + pad * 2);
+    const kY = MAP_VIEWBOX.height / (maxY - minY + pad * 2);
+    const k  = Math.max(1, Math.min(8, Math.min(kX, kY)));
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    setViewTransform(clamp(
+      MAP_VIEWBOX.width  / 2 - cx * k,
+      MAP_VIEWBOX.height / 2 - cy * k,
+      k,
+    ));
+  }, [projectedHubs, clamp]);
+
+  // Seleccionar un envío: trae su ruta completa y la dibuja, y además selecciona el
+  // vuelo correspondiente — igual que en SimulationDashboardView:
+  // - Tramo EN VUELO (DEPARTED): selecciona el avión real vía planes (fromIcao/toIcao).
+  // - Tramo ASIGNADO (PLANNED, aún no despega): selecciona el vuelo programado
+  //   correspondiente vía la lista de vuelos del API (fromIcao/toIcao/depTime, con
+  //   1 min de tolerancia — el endpoint de ruta no expone el flightId del tramo).
+  // No hay tarjeta flotante: el envío queda fijado en su propia pestaña, y si el
+  // vuelo resuelto se revisa luego desde la pestaña Vuelos, aparece fijado también.
+  const focusOnShipment = useCallback(async (s: SimShipment) => {
+    if (!ops?.id) return;
+    if (selectedShipmentId === s.shipmentId) {
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      setSelectedFlightId(null);
+      return;
+    }
+    try {
+      const legs = await simulationService.getShipmentRoute(ops.id, s.shipmentId);
+      if (legs.length === 0) return;
+      setSelectedShipmentId(s.shipmentId);
+      setRouteOverlay({ shipmentId: s.shipmentId, legs });
+      setSelectedAirportId(null);
+
+      const inFlightLeg = legs.find(l => l.state === 'DEPARTED');
+      const plannedLeg  = !inFlightLeg ? legs.find(l => l.state === 'PLANNED') : undefined;
+
+      if (inFlightLeg) {
+        const plane = planes.find(p => p.fromIcao === inFlightLeg.fromIcao && p.toIcao === inFlightLeg.toIcao);
+        if (plane) {
+          selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
+          return;
+        }
+      } else if (plannedLeg) {
+        const plannedDepMs = new Date(plannedLeg.depTime).getTime();
+        const candidateFlights = opsAllFlights.length > 0 ? opsAllFlights : opsFlightList;
+        const matchedFlight = candidateFlights.find(f =>
+          f.fromIcao === plannedLeg.fromIcao && f.toIcao === plannedLeg.toIcao &&
+          Math.abs(new Date(f.depTime).getTime() - plannedDepMs) < 60_000
+        );
+        if (matchedFlight) {
+          setSelectedFlightId(matchedFlight.flightId);
+          setInfoPanelTab('flights');
+          return;
+        }
+      }
+
+      // Sin vuelo resoluble: solo mostrar la ruta.
+      setSelectedFlightId(null);
+      fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
+    } catch { /* silencioso */ }
+  }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs]);
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -328,6 +434,65 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             })}
           </g>
 
+          {/* Ruta del envío seleccionado (escalas / directo) */}
+          {routeOverlay && (
+            <g className="shipment-route">
+              {routeOverlay.legs.map((leg, i) => {
+                const o = hubIndex.get(leg.fromIcao);
+                const d = hubIndex.get(leg.toIcao);
+                if (!o || !d) return null;
+                const dist = Math.sqrt((d.projectedX! - o.projectedX!) ** 2 + (d.projectedY! - o.projectedY!) ** 2);
+                const cx = (o.projectedX! + d.projectedX!) / 2;
+                const cy = (o.projectedY! + d.projectedY!) / 2 - dist * 0.2;
+                const path = `M ${o.projectedX} ${o.projectedY} Q ${cx} ${cy} ${d.projectedX} ${d.projectedY}`;
+                const color = leg.state === 'ARRIVED' ? '#10b981'
+                            : leg.state === 'DEPARTED' ? '#f59e0b'
+                            : '#2563eb';
+                const planned = leg.state === 'PLANNED';
+                return (
+                  <path
+                    key={`${leg.fromIcao}-${leg.toIcao}-${i}`}
+                    d={path}
+                    stroke={color}
+                    strokeWidth={(planned ? 1.6 : 2.0) / viewTransform.k}
+                    fill="none"
+                    opacity={0.95}
+                    strokeLinecap="round"
+                    strokeDasharray={planned ? `${5 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                  />
+                );
+              })}
+              {/* Marcadores: origen, escalas y destino */}
+              {[routeOverlay.legs[0]?.fromIcao, ...routeOverlay.legs.map(l => l.toIcao)]
+                .filter((ic, idx, arr) => ic && ic !== arr[idx - 1])
+                .map((ic, idx, arr) => {
+                  const h = hubIndex.get(ic!);
+                  if (!h) return null;
+                  const isOrigin = idx === 0;
+                  const isDest   = idx === arr.length - 1;
+                  const fillDot = isOrigin ? '#10b981' : isDest ? '#2563eb' : '#f59e0b';
+                  const r = (isOrigin || isDest ? 3.4 : 2.6) / viewTransform.k;
+                  return (
+                    <g key={`stop-${ic}-${idx}`}>
+                      <circle cx={h.projectedX!} cy={h.projectedY!} r={r + 1.5 / viewTransform.k} fill="white" opacity={0.9} />
+                      <circle cx={h.projectedX!} cy={h.projectedY!} r={r} fill={fillDot} />
+                      <text
+                        x={h.projectedX!}
+                        y={h.projectedY! - (r + 3 / viewTransform.k)}
+                        textAnchor="middle"
+                        fontSize={5 / viewTransform.k}
+                        fontWeight={700}
+                        fill="#0f172a"
+                        style={{ paintOrder: 'stroke', stroke: 'white', strokeWidth: 1.5 / viewTransform.k }}
+                      >
+                        {ic}
+                      </text>
+                    </g>
+                  );
+                })}
+            </g>
+          )}
+
           {/* Aviones en vivo */}
           <g className="planes" filter="url(#ops-plane-glow)">
             {planes.map(plane => {
@@ -335,9 +500,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               const dest   = hubIndex.get(plane.toIcao);
               if (!origin || !dest) return null;
               const isHighlighted = plane.flightId === selectedFlightId;
+              const isDimmed = selectedFlightId && !isHighlighted;
               return (
                 <g
                   key={plane.key}
+                  opacity={isDimmed ? 0.2 : 1}
                   style={{ cursor: 'pointer' }}
                   onClick={() => focusOnPlane(plane)}
                   onMouseEnter={(e) => {
@@ -671,6 +838,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               shipments={opsShipments}
               selectedAirportId={selectedAirportId}
               selectedFlightId={selectedFlightId}
+              selectedShipmentId={selectedShipmentId}
               onSelectAirport={(icao) => {
                 focusOnAirport(icao);
                 setSelectedFlightId(null);
@@ -680,10 +848,13 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                 if (plane) {
                   focusOnPlane(plane);
                 } else {
+                  setSelectedShipmentId(null);
+                  setRouteOverlay(null);
                   setSelectedFlightId(prev => prev === sf.flightId ? null : sf.flightId);
                   setInfoPanelTab('flights');
                 }
               }}
+              onSelectShipment={focusOnShipment}
               activeTab={infoPanelTab}
               onTabChange={setInfoPanelTab}
               activeFlightIds={activeFlightIds}

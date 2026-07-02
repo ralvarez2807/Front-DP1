@@ -119,7 +119,24 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       (f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT'
     );
 
+    // Carga en vivo por vuelo — el snapshot es la fuente que refresca la carga de
+    // los aviones ya en pantalla (el WS FLIGHT_DEPARTED llega con load=0, ver nota
+    // en el ciclo de vida de vuelos de SimulationDashboardView).
+    const liveByKey = new Map<string, { capacity: number; load: number }>();
+    inAir.forEach((f: any) => {
+      liveByKey.set(planeKey(f.flightId, f.fromIcao, f.toIcao), { capacity: f.capacity ?? 0, load: f.load ?? 0 });
+    });
+
     setPlanes(prev => {
+      // Refresca capacidad/carga de los aviones ya trackeados — antes se ignoraban
+      // aquí, así que su color en el mapa quedaba congelado en el valor (0 = verde)
+      // del primer FLIGHT_DEPARTED y nunca reflejaba la ocupación real.
+      const updated = prev.map(p => {
+        const live = liveByKey.get(p.key);
+        if (!live || live.capacity === 0) return p;
+        return { ...p, capacity: live.capacity, occupied: live.load };
+      });
+
       const existing = new Set(prev.map(p => p.key));
       const restored: OpsPlane[] = [];
       inAir.forEach((f: any) => {
@@ -144,7 +161,7 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           startedAt, durationMs, capacity: f.capacity ?? 0, occupied: f.load ?? 0,
         });
       });
-      return restored.length ? [...prev, ...restored] : prev;
+      return restored.length ? [...updated, ...restored] : updated;
     });
   }, [computeDuration]);
 
