@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import {
   Play, Pause, RotateCcw, Settings2, Database,
   Map as MapIcon, Clock, AlertTriangle, CheckCircle,
-  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, X,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -86,10 +86,14 @@ function mergeSeenFlights(
 }
 
 function getPlaneColor(occupied: number, capacity: number, highlighted: boolean): string {
-  if (highlighted) return '#f59e0b';
+  // Violeta para "seleccionado": el dorado/ámbar ya lo usa el estado "en alerta"
+  // (70-90% de carga) y con varios aviones ámbar en pantalla se confundían.
+  if (highlighted) return '#8b5cf6';
   if (capacity === 0) return '#2563eb';
   const pct = (occupied / capacity) * 100;
-  if (pct >= 90) return '#ef4444';
+  // Rojo más oscuro que el de rutas/hubs (#ef4444): a este tamaño de ícono, el
+  // mismo tono se perdía contra las líneas de ruta activas del mismo color.
+  if (pct >= 90) return '#b91c1c';
   if (pct >= 70) return '#f59e0b';
   return '#10b981';
 }
@@ -164,7 +168,7 @@ function AnimatedPlane({
   // Escala base reducida a 0.6 para aviones más pequeños
   return (
     <g transform={`translate(${pos.x},${pos.y}) rotate(${pos.angle}) scale(${iconScale * size * 0.6})`}>
-      {highlighted && <circle cx="0" cy="0" r="14" fill="rgba(245,158,11,0.15)" />}
+      {highlighted && <circle cx="0" cy="0" r="14" fill="rgba(139,92,246,0.18)" />}
       {/* Fuselaje */}
       <ellipse cx="0" cy="0" rx="1.8" ry="7" fill={color} />
       {/* Nariz */}
@@ -173,9 +177,9 @@ function AnimatedPlane({
       <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill={color} />
       {/* Cola */}
       <path d="M-1.5,5 L-5,8 L-4,9 L-1.5,7 L1.5,7 L4,9 L5,8 L1.5,5 Z" fill={color} />
-      {/* Borde blanco para contraste */}
-      <ellipse cx="0" cy="0" rx="1.8" ry="7" fill="none" stroke="white" strokeWidth="0.6" />
-      <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill="none" stroke="white" strokeWidth="0.5" />
+      {/* Borde oscuro para contraste — antes blanco, se perdía contra el mar y tierra claros */}
+      <ellipse cx="0" cy="0" rx="1.8" ry="7" fill="none" stroke="#1e293b" strokeWidth="0.6" />
+      <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill="none" stroke="#1e293b" strokeWidth="0.5" />
     </g>
   );
 }
@@ -665,6 +669,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setActivePlanes([]);
       setSeenFlights([]);
       setSelectedFlightId(null);
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
       planeTimersRef.current.forEach(t => clearTimeout(t));
       planeTimersRef.current.clear();
     }
@@ -739,8 +745,17 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   // ── Aeropuerto seleccionado ──────────────────────────────────────────────
   const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
 
+  // ── Envío seleccionado (pestaña Paquetes) — declarado antes de focusOnAirport/
+  // focusOnFlight porque ambos lo limpian al hacer una selección directa distinta
+  // de un envío (clic en avión, aeropuerto o vuelo desde el panel).
+  const [selectedShipmentId, setSelectedShipmentId] = useState<string | null>(null);
+  const [routeOverlay, setRouteOverlay] =
+    useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
+
   const focusOnAirport = useCallback((icao: string) => {
     setSelectedAirportId(prev => prev === icao ? null : icao);
+    setSelectedShipmentId(null);
+    setRouteOverlay(null);
     const hub = projectedHubs.find(h => h.id === icao);
     if (!hub) return;
     const targetK = 5;
@@ -766,12 +781,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     };
   }, [projectedHubs]);
 
-  // Al seleccionar un vuelo, hacer zoom instantáneo al avión (o al midpoint si aterrizó)
-  const focusOnFlight = useCallback((sf: SeenFlight) => {
-    const newId = sf.flightId === selectedFlightId ? null : sf.flightId;
-    setSelectedFlightId(newId);
+  // Selecciona un vuelo sin togglear (usada por focusOnFlight y por la selección de
+  // envíos "en vuelo", que siempre debe seleccionar, nunca deseleccionar por rebote
+  // si ese vuelo ya estaba elegido por otra vía).
+  const selectFlight = useCallback((sf: SeenFlight) => {
+    setSelectedFlightId(sf.flightId);
     setSelectedAirportId(null);
-    if (!newId) return;
     const origin = projectedHubs.find(h => h.id === sf.fromIcao);
     const dest   = projectedHubs.find(h => h.id === sf.toIcao);
     if (!origin || !dest) return;
@@ -790,14 +805,33 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       fy = (origin.projectedY! + dest.projectedY!) / 2;
     }
     setViewTransform(clamp(W / 2 - fx * targetK, H / 2 - fy * targetK, targetK));
-  }, [projectedHubs, clamp, selectedFlightId, activePlanes, getPlanePosition]);
+  }, [projectedHubs, clamp, activePlanes, getPlanePosition]);
 
-  // Enfocar un vuelo desde el panel de información (datos del API).
-  // Para vuelos DEPARTED: resuelve primero contra activePlanes (fuente de verdad del WS actual)
-  // para obtener el flightId exacto y las ICAO correctas, evitando mezclar instancias del mismo
-  // horario de días distintos.
+  // Al seleccionar un vuelo desde el panel o el mapa (clic directo, no vía un envío):
+  // togglea y limpia cualquier envío que estuviera fijado, porque deja de ser el
+  // contexto de la selección actual.
+  const focusOnFlight = useCallback((sf: SeenFlight) => {
+    if (sf.flightId === selectedFlightId) {
+      setSelectedFlightId(null);
+      setSelectedAirportId(null);
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      return;
+    }
+    setSelectedShipmentId(null);
+    setRouteOverlay(null);
+    selectFlight(sf);
+  }, [selectedFlightId, selectFlight]);
+
+  // Resuelve el SeenFlight correcto para un SimFlight del API (registrándolo en
+  // seenFlights si hace falta) sin seleccionarlo — común a focusOnSimFlight (clic
+  // directo desde el panel) y a la selección de envíos con ruta ASIGNADA (clic
+  // indirecto vía un envío).
+  // Para vuelos DEPARTED: resuelve primero contra activePlanes (fuente de verdad del
+  // WS actual) para obtener el flightId exacto y las ICAO correctas, evitando mezclar
+  // instancias del mismo horario de días distintos.
   // Para vuelos SCHEDULED/ARRIVED: crea un SeenFlight sintético con datos del API.
-  const focusOnSimFlight = useCallback((f: SimFlight) => {
+  const resolveSeenFlight = useCallback((f: SimFlight): SeenFlight => {
     // 1. Buscar el avión activo en el mapa: solo por flightId exacto o scheduleId.
     // NO usar la ruta (fromIcao/toIcao) como fallback: si hay dos vuelos en la misma
     // ruta, cogería el primero que encuentre en activePlanes en lugar del vuelo correcto.
@@ -811,11 +845,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
     // 2. Buscar SeenFlight con el ID resuelto (no por scheduleId, para no coger instancias antiguas)
     const existing = seenFlights.find(sf => sf.flightId === resolvedId);
-
-    if (existing) {
-      focusOnFlight(existing);
-      return;
-    }
+    if (existing) return existing;
 
     // 3. Sin SeenFlight: construir uno con el ID y las ICAO correctas.
     // isActive solo es true si el WS tiene un avión activo para este vuelo.
@@ -829,18 +859,19 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       isActive: !!matchingPlane,
     };
     setSeenFlights(prev => mergeSeenFlights(prev, synthetic, resolvedId));
-    focusOnFlight(synthetic);
-  }, [seenFlights, focusOnFlight, activePlanes]);
+    return synthetic;
+  }, [seenFlights, activePlanes]);
+
+  // Enfocar un vuelo desde el panel de información (clic directo del usuario).
+  const focusOnSimFlight = useCallback((f: SimFlight) => {
+    focusOnFlight(resolveSeenFlight(f));
+  }, [resolveSeenFlight, focusOnFlight]);
 
   // Enfocar un aeropuerto desde el panel y deseleccionar vuelo
   const handleSelectAirportFromPanel = useCallback((icao: string) => {
     focusOnAirport(icao);
     setSelectedFlightId(null);
   }, [focusOnAirport]);
-
-  // ── Ruta de un envío dibujada en el mapa (escalas / directo) ──────────────
-  const [routeOverlay, setRouteOverlay] =
-    useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
 
   // Encuadra la cámara para que entren todos los aeropuertos dados.
   const fitToHubs = useCallback((icaos: string[]) => {
@@ -864,20 +895,58 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     ));
   }, [projectedHubs, clamp]);
 
-  // Seleccionar un envío: trae su ruta completa, la dibuja y encuadra la cámara.
+  // Seleccionar un envío: trae su ruta completa y la dibuja, y además selecciona el
+  // vuelo correspondiente con la misma función que usa el panel de vuelos (mismo
+  // resaltado, mismo seguimiento de cámara, mismo fijado en la pestaña Vuelos):
+  // - Tramo EN VUELO (DEPARTED): selecciona el avión real vía activePlanes.
+  // - Tramo ASIGNADO (PLANNED, aún no despega): selecciona el vuelo programado
+  //   correspondiente vía simFlightList — mismo comportamiento que seleccionar un
+  //   vuelo programado desde el panel (ruta punteada, vuelo fijado, sin avión).
+  // No hay tarjeta flotante: el envío queda fijado en su propia pestaña.
   const focusOnShipment = useCallback(async (s: SimShipment) => {
     if (!session?.id) return;
-    // Toggle: si ya está seleccionado, lo limpia.
-    if (routeOverlay?.shipmentId === s.shipmentId) { setRouteOverlay(null); return; }
+    // Toggle: si ya está seleccionado, lo limpia todo (ruta, envío y el vuelo que
+    // hubiera seleccionado para mostrarlo).
+    if (selectedShipmentId === s.shipmentId) {
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      setSelectedFlightId(null);
+      return;
+    }
     try {
       const legs = await simulationService.getShipmentRoute(session.id, s.shipmentId);
-      if (legs.length === 0) { setRouteOverlay(null); return; }
-      setSelectedFlightId(null);
+      if (legs.length === 0) return;
+      setSelectedShipmentId(s.shipmentId);
       setRouteOverlay({ shipmentId: s.shipmentId, legs });
-      const icaos = [legs[0].fromIcao, ...legs.map(l => l.toIcao)];
-      fitToHubs(icaos);
+      setSelectedAirportId(null);
+
+      const inFlightLeg = legs.find(l => l.state === 'DEPARTED');
+      const plannedLeg  = !inFlightLeg ? legs.find(l => l.state === 'PLANNED') : undefined;
+
+      let sf: SeenFlight | undefined;
+      if (inFlightLeg) {
+        const plane = activePlanes.find(p => p.fromIcao === inFlightLeg.fromIcao && p.toIcao === inFlightLeg.toIcao);
+        sf = plane ? seenFlights.find(f => f.flightId === plane.flightId) : undefined;
+      } else if (plannedLeg) {
+        // Sin flightId en el leg (el endpoint no lo expone): se resuelve contra la
+        // lista de vuelos por ruta + hora de salida, con tolerancia de 1 min.
+        const plannedDepMs = new Date(plannedLeg.depTime).getTime();
+        const matchedFlight = simFlightList.find(f =>
+          f.fromIcao === plannedLeg.fromIcao && f.toIcao === plannedLeg.toIcao &&
+          Math.abs(new Date(f.depTime).getTime() - plannedDepMs) < 60_000
+        );
+        sf = matchedFlight ? resolveSeenFlight(matchedFlight) : undefined;
+      }
+
+      if (sf) {
+        selectFlight(sf);
+      } else {
+        setSelectedFlightId(null);
+        const icaos = [legs[0].fromIcao, ...legs.map(l => l.toIcao)];
+        fitToHubs(icaos);
+      }
     } catch { /* silencioso */ }
-  }, [session?.id, routeOverlay, fitToHubs]);
+  }, [session?.id, selectedShipmentId, activePlanes, seenFlights, simFlightList, resolveSeenFlight, selectFlight, fitToHubs]);
 
   // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
   const selectedFlightIdRef = useRef<string | null>(null);
@@ -1161,8 +1230,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   onMouseLeave={() => setPlaneTooltip(null)}
                   onClick={() => {
                     const sf = seenFlights.find(f => f.flightId === plane.flightId);
-                    if (sf) focusOnFlight(sf);
-                    else { setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId); setSelectedAirportId(null); }
+                    if (sf) {
+                      focusOnFlight(sf);
+                    } else {
+                      setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId);
+                      setSelectedAirportId(null);
+                      setSelectedShipmentId(null);
+                      setRouteOverlay(null);
+                    }
                     setInfoPanelOpen(true);
                     setInfoPanelTab('flights');
                   }}
@@ -1292,43 +1367,6 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           </g>
         </g>
       </svg>
-
-      {/* ── CHIP RUTA DEL ENVÍO ─────────────────────────────────────────────── */}
-      {routeOverlay && (() => {
-        const stops = [routeOverlay.legs[0]?.fromIcao, ...routeOverlay.legs.map(l => l.toIcao)]
-          .filter((ic, idx, arr) => ic && ic !== arr[idx - 1]);
-        const connections = Math.max(0, stops.length - 2);
-        return (
-          <div className="absolute top-[72px] left-1/2 -translate-x-1/2 z-30 bg-white/97 backdrop-blur-md rounded-xl border border-slate-200 shadow-xl px-4 py-2.5 flex items-center gap-3">
-            <div className="flex flex-col">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Ruta del envío</span>
-              <span className="text-sm font-black text-slate-900 font-mono">{routeOverlay.shipmentId}</span>
-            </div>
-            <div className="h-8 w-px bg-slate-200" />
-            <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
-              {stops.map((ic, i) => (
-                <React.Fragment key={`chip-${ic}-${i}`}>
-                  {i > 0 && <span className="text-slate-300">→</span>}
-                  <span className="font-mono">{ic}</span>
-                </React.Fragment>
-              ))}
-            </div>
-            <span className={cn(
-              'text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-md',
-              connections === 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700',
-            )}>
-              {connections === 0 ? 'Directo' : `${connections} escala${connections > 1 ? 's' : ''}`}
-            </span>
-            <button
-              onClick={() => setRouteOverlay(null)}
-              className="text-slate-400 hover:text-slate-700 transition-colors"
-              aria-label="Cerrar ruta"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        );
-      })()}
 
       {/* ── TOOLTIP HUB ─────────────────────────────────────────────────────── */}
       <AnimatePresence>
@@ -1701,6 +1739,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               shipments={simShipmentList}
               selectedAirportId={selectedAirportId}
               selectedFlightId={selectedFlightId}
+              selectedShipmentId={selectedShipmentId}
               onSelectAirport={handleSelectAirportFromPanel}
               onSelectFlight={focusOnSimFlight}
               onSelectShipment={focusOnShipment}

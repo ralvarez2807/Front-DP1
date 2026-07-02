@@ -8,6 +8,7 @@ import { SocketProvider } from './providers/SocketProvider';
 import { SimulationProvider } from './providers/SimulationProvider';
 import { MonitoringProvider } from './providers/MonitoringProvider';
 import { OperationsProvider } from './providers/OperationsProvider';
+import { BulkUploadProvider } from './providers/BulkUploadProvider';
 import { ToastProvider } from './providers/ToastProvider';
 import { MapProvider } from './providers/MapProvider';
 
@@ -20,7 +21,9 @@ createRoot(document.getElementById('root')!).render(
             <SimulationProvider>
               <MonitoringProvider>
                 <OperationsProvider>
-                  <App />
+                  <BulkUploadProvider>
+                    <App />
+                  </BulkUploadProvider>
                 </OperationsProvider>
               </MonitoringProvider>
             </SimulationProvider>

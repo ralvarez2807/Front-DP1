@@ -11,6 +11,7 @@ import { useNetworkData } from './hooks/useNetworkData';
 import { useAuthContext } from './providers/AuthProvider';
 import { useSimulationContext } from './providers/SimulationProvider';
 import { useOperationsContext } from './providers/OperationsProvider';
+import { useBulkUploadContext } from './providers/BulkUploadProvider';
 import { SlaBreachesModal } from './components/SlaBreachesModal';
 
 import { getStorageStatus } from './lib/simulation-utils';
@@ -44,7 +45,18 @@ function AppContent() {
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
   } = useSimulationContext();
   const { metrics: opsMetrics, activeFlightCount, connected: opsConnected } = useOperationsContext();
+  const { job: bulkJob, dismissJob: dismissBulkJob } = useBulkUploadContext();
   const SPEED_FACTOR = 80;
+
+  // El botón "Cerrar" del cuadrito flotante de carga masiva solo lo oculta — no
+  // cancela el envío en curso ni borra el seguimiento, que sigue disponible en la
+  // pestaña Órdenes. Se reabre solo si arranca un trabajo nuevo, o si el que estaba
+  // corriendo termina (para mostrar el resumen final aunque lo hubieras ocultado).
+  const [bulkWidgetHidden, setBulkWidgetHidden] = useState(false);
+  useEffect(() => {
+    if (bulkJob) setBulkWidgetHidden(false);
+  }, [bulkJob?.startedAt]);
+  const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
@@ -528,6 +540,75 @@ function AppContent() {
               >
                 Cerrar
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── NOTIFICACIÓN GLOBAL: Carga masiva de órdenes ─────────────────────── */}
+      {/* Visible desde cualquier pestaña — el envío vive en BulkUploadProvider,
+          no en OrderUploadView, así que cambiar de pestaña ya no le hace perder
+          el progreso ni lo corta. */}
+      <AnimatePresence>
+        {showBulkWidget && bulkJob && (
+          <motion.div
+            initial={{ opacity: 0, x: -60 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -60 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+            className="fixed bottom-6 left-6 z-[300] w-80 bg-white rounded-2xl border border-blue-200 shadow-2xl overflow-hidden"
+          >
+            <div className="bg-blue-600 px-4 py-3 flex items-center gap-3">
+              <PackagePlus className="w-5 h-5 text-white shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-white font-black text-sm truncate flex items-center gap-1.5">
+                  {bulkJob.status === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse shrink-0" />}
+                  {bulkJob.status === 'running' ? 'Archivo leído exitosamente' : bulkJob.status === 'cancelled' ? 'Carga cancelada' : 'Carga completada'}
+                </p>
+                <p className="text-blue-200 text-[10px] truncate">{bulkJob.fileName}</p>
+              </div>
+              {bulkJob.status !== 'running' && (
+                <button
+                  onClick={dismissBulkJob}
+                  className="text-blue-200 hover:text-white text-lg leading-none shrink-0"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {/* Sin conteos en vivo: mostrar "N / M registradas" mientras la mayoría
+                sigue esperando su hora real (potencialmente horas o días) da la
+                impresión de que el sistema no leyó nada. Solo al terminar de verdad
+                se muestra un resumen — ahí los números sí son un reporte final, no
+                un ratio engañoso a mitad de camino. */}
+            {bulkJob.status !== 'running' && (
+              <div className="px-4 py-3">
+                <p className="text-[10px] text-slate-500 font-bold text-center">
+                  {bulkJob.successCount.toLocaleString()} ok
+                  {bulkJob.failCount > 0 && ` · ${bulkJob.failCount.toLocaleString()} con error`}
+                  {bulkJob.discardedCount > 0 && ` · ${bulkJob.discardedCount.toLocaleString()} descartadas`}
+                </p>
+              </div>
+            )}
+            <div className="px-4 pb-4 flex gap-2">
+              {bulkJob.status === 'running' ? (
+                // No cancela el envío en curso — solo oculta este cuadrito. La carga
+                // sigue corriendo en segundo plano y se puede revisar o cancelar de
+                // verdad desde la pestaña Órdenes.
+                <button
+                  onClick={() => setBulkWidgetHidden(true)}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-black transition-colors"
+                >
+                  Cerrar
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setActiveView('orders'); dismissBulkJob(); }}
+                  className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors"
+                >
+                  Ver Órdenes →
+                </button>
+              )}
             </div>
           </motion.div>
         )}
