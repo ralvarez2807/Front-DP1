@@ -4,7 +4,7 @@ import { SocketService } from './socket';
 /** Estado de la sesión de "Operación Día a Día" (GET /api/v1/operations). */
 export interface OperationsStatus {
   id: string;
-  status: 'starting' | 'running' | 'paused' | 'completed' | 'stopped';
+  status: 'starting' | 'running' | 'paused' | 'completed' | 'collapsed' | 'stopped';
   simTime: string;
   simStart: string;
   simEnd: string;

@@ -59,7 +59,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     const sessionId = ops?.id;
     const opsStatus = ops?.status;
     // Skip dead sessions — their /flights endpoint returns 404
-    if (!sessionId || opsStatus === 'stopped' || opsStatus === 'completed') return;
+    if (!sessionId || opsStatus === 'stopped' || opsStatus === 'completed' || opsStatus === 'collapsed') return;
 
     let cancelled = false;
     let timerId: ReturnType<typeof setInterval> | null = null;

@@ -110,7 +110,7 @@ Al montar `SimulationProvider`:
 > Arreglado: el efecto ahora depende de `[isAuthenticated]` y se reintenta en cada login.
 
 ### Estado de sesión
-El backend devuelve `status` en minúsculas: `starting | running | paused | completed | stopped`.
+El backend devuelve `status` en minúsculas: `starting | running | paused | completed | collapsed | stopped`.
 `mapSession` normaliza a minúsculas via `.toLowerCase()`.
 El tipo `SimulationSession.status` refleja exactamente estos valores.
 
@@ -119,7 +119,7 @@ El tipo `SimulationSession.status` refleja exactamente estos valores.
 
 ### Polling
 Corre cada 4s para todos los estados activos (`starting | running | paused`).
-Si el polling detecta `stopped | completed` o un 404 → cierra la sesión automáticamente.
+Si el polling detecta `stopped | completed | collapsed` o un 404 → cierra la sesión automáticamente.
 
 ## Simulación hasta el colapso
 
@@ -129,9 +129,14 @@ normal, no un modo aparte en el backend:
 - Al crear la sesión, `simulationService.createSession` manda `collapseOnFailure: true`
   en el body de `POST /simulations` (mismo endpoint que la sim de 5 días). El backend activa
   su `CollapseDetector` (deadline vencido o 5+ ciclos ALNS sin ruta viable) y, si detecta
-  colapso, publica el evento WS `COLLAPSE_DETECTED` y detiene la sesión (termina en
-  `status: COMPLETED`, igual que un fin normal por `simEnd` — no hay status distinto para
-  "colapsado").
+  colapso, publica el evento WS `COLLAPSE_DETECTED` y detiene la sesión, terminando en
+  `status: COLLAPSED` (status propio, distinto de `COMPLETED` — agregado al backend
+  posteriormente; el frontend lo trata como terminal en los tres lugares que verifican status
+  de sesión: rehidratación vía `getMine`, el handler de `SIM_STATUS`, y el polling de
+  respaldo en `SimulationProvider`, todos en `'stopped' | 'completed' | 'collapsed'`).
+  El cierre de UI normalmente ya ocurre antes, vía el evento dedicado `COLLAPSE_DETECTED`
+  (ver más abajo) — el status `collapsed` es la red de seguridad para cuando el WS no llega
+  (reconexión, polling de respaldo).
 - `computeDateRange` (en `SimulationProvider`) le da `simEnd = simStart + 30 días` (vs. +5
   para el escenario normal) — el backend **no soporta un rango sin fin**, `simEnd` sigue
   siendo obligatorio; los 30 días son margen para que el colapso ocurra antes de agotar el

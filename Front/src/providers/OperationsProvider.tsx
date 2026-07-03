@@ -218,7 +218,7 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       operationsService.getStatus()
         .then(s => {
           speedFactorRef.current = s.speedFactor || 1;
-          if (s.id !== opsIdRef.current || s.status === 'completed' || s.status === 'stopped') {
+          if (s.id !== opsIdRef.current || s.status === 'completed' || s.status === 'stopped' || s.status === 'collapsed') {
             initRef.current?.();
           } else {
             setOps(s);

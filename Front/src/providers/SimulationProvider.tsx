@@ -148,7 +148,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       .then(mine => {
         if (!mine) return;
         const status = mine.status?.toLowerCase() as SimulationSession['status'];
-        if (status === 'stopped' || status === 'completed') return;
+        if (status === 'stopped' || status === 'completed' || status === 'collapsed') return;
 
         const savedConfig = localStorage.getItem('simulation_config');
         const config: { scenario: SimulationScenario; speed: number } = savedConfig
@@ -197,7 +197,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const unsub = socket.on('SIM_STATUS', ({ payload }: { payload: { status: string } }) => {
       const status = payload?.status?.toLowerCase() as SimulationSession['status'];
       if (!status) return;
-      if (status === 'stopped' || status === 'completed') {
+      if (status === 'stopped' || status === 'completed' || status === 'collapsed') {
         // Capturar el ID antes de limpiar la sesión
         setSession(prev => {
           if (prev?.id && status === 'completed') {
@@ -213,7 +213,8 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setEvents([]);
         setSessionStartedAt(null);
         setLastSimUpdate(null);
-        if (status !== 'completed') {
+        // "collapsed" no muestra este toast: el modal de COLLAPSE_DETECTED ya informa el desenlace.
+        if (status !== 'completed' && status !== 'collapsed') {
           addToast('Simulación detenida externamente', 'info');
         }
         return;
@@ -224,6 +225,10 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   }, [socket, addToast]);
 
   // ── COLLAPSE_DETECTED: el backend detectó colapso operativo ──────────────
+  // Aplica a cualquier escenario (todos corren con collapseOnFailure: true).
+  // Finaliza la sesión localmente como si hubiera terminado normalmente — el
+  // backend la detiene y termina en status "completed", pero no esperamos a
+  // ese SIM_STATUS para cerrar: el modal de colapso ya informa el desenlace.
   useEffect(() => {
     if (!session?.startTimeAt) return;
     const startTimeAt = session.startTimeAt;
@@ -243,6 +248,12 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         simElapsedMs,
         realElapsedMs,
       });
+      socketService.disconnect();
+      localStorage.removeItem('simulation_config');
+      setSession(null);
+      setEvents([]);
+      setSessionStartedAt(null);
+      setLastSimUpdate(null);
     });
     return unsub;
   }, [socket, session?.startTimeAt, sessionStartedAt]);
@@ -272,7 +283,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   // ── Polling de respaldo: sincroniza estado aunque el WS no llegue ─────────
   useEffect(() => {
-    const TERMINAL = new Set(['stopped', 'completed']);
+    const TERMINAL = new Set(['stopped', 'completed', 'collapsed']);
     const ACTIVE   = new Set(['starting', 'running', 'paused']);
     if (!session?.id || !ACTIVE.has(session.status)) return;
 
@@ -289,7 +300,11 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           setSession(null);
           setEvents([]);
           addToast(
-            updated.status === 'completed' ? 'Simulación completada' : 'Simulación detenida externamente',
+            updated.status === 'completed'
+              ? 'Simulación completada'
+              : updated.status === 'collapsed'
+                ? 'La simulación colapsó'
+                : 'Simulación detenida externamente',
             'info'
           );
           return;

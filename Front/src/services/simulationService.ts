@@ -147,6 +147,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
 }
 
 const SPEED_FACTOR = 80.0; // 5 días × 24h / 1.5h real = 80
+const COLLAPSE_SPEED_FACTOR = 1000.0; // colapso: rango de fechas muy amplio, hay que acelerar más
 
 export const simulationService = {
   createSession: async (
@@ -161,8 +162,11 @@ export const simulationService = {
       optimizerMode:    'ALNS_ONLY',
       simStart,
       simEnd,
-      speedFactor:      SPEED_FACTOR,
-      collapseOnFailure: config.scenario === SCENARIOS.COLLAPSE,
+      speedFactor:      config.scenario === SCENARIOS.COLLAPSE ? COLLAPSE_SPEED_FACTOR : SPEED_FACTOR,
+      // Todos los escenarios detectan colapso; la diferencia del escenario COLLAPSE
+      // es únicamente el rango de fechas (ver computeDateRange), tan amplio que
+      // permite observar el colapso real en vez de cortar la simulación antes.
+      collapseOnFailure: true,
     };
     const response = await api.post('/simulations', body, { signal });
     return mapSession(response.data, config);

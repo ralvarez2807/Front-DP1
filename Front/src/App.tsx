@@ -42,7 +42,6 @@ function AppContent() {
   } = useSimulationContext();
   const { metrics: opsMetrics, activeFlightCount, connected: opsConnected } = useOperationsContext();
   const { job: bulkJob, dismissJob: dismissBulkJob } = useBulkUploadContext();
-  const SPEED_FACTOR = 80;
 
   // El botón "Cerrar" del cuadrito flotante de carga masiva solo lo oculta — no
   // cancela el envío en curso ni borra el seguimiento, que sigue disponible en la
@@ -119,10 +118,10 @@ function AppContent() {
   const displayDate = useMemo(() => {
     if (activeView !== 'simulation' || !session?.startTimeAt) return now;
     if (lastSimUpdate && session.status === 'running') {
-      return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * SPEED_FACTOR);
+      return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * session.speedFactor);
     }
     return new Date(new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000);
-  }, [now, session, lastSimUpdate, SPEED_FACTOR, activeView]);
+  }, [now, session, lastSimUpdate, activeView]);
 
   // ── Rutas activas ────────────────────────────────────────────────────────
   const activeRoutes = useMemo(() => {
