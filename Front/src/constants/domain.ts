@@ -12,7 +12,7 @@ export type SimulationScenario = typeof SCENARIOS[keyof typeof SCENARIOS];
 
 export const SCENARIO_LABELS: Record<SimulationScenario, string> = {
   [SCENARIOS.DAILY]: 'Operación Diaria (24h)',
-  [SCENARIOS.PERIOD_5D]: 'Operación Periodo 5 Días',
+  [SCENARIOS.PERIOD_5D]: 'Operación por Periodo (3/5/7 días)',
   [SCENARIOS.COLLAPSE]: 'Operación hasta el Colapso',
 };
 

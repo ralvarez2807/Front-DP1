@@ -53,6 +53,7 @@ export const operationsService = {
   getDashboard: async (id: string, signal?: AbortSignal): Promise<{
     simTime: string; delivered: number; pending: number; assigned: number;
     inFlight: number; slaBreaches: number; throughputPerHour: number;
+    fleetOccupancyPct?: number; airportOccupancyPct?: number;
   }> => {
     const response = await api.get(`/simulations/${id}/dashboard`, { signal });
     return response.data;
@@ -65,5 +66,11 @@ export const operationsService = {
   createOrder: async (order: CreateOrderRequest): Promise<CreateOrderResponse> => {
     const response = await api.post('/operations/orders', order);
     return response.data as CreateOrderResponse;
+  },
+
+  /** Total histórico de pedidos registrados en BD a un instante dado (LE-36). */
+  getOrdersCount: async (signal?: AbortSignal): Promise<{ total: number; asOf: string }> => {
+    const response = await api.get('/operations/orders/count', { signal });
+    return response.data as { total: number; asOf: string };
   },
 };

@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import {
   Play, Pause, RotateCcw, Settings2, Database,
   Map as MapIcon, Clock, AlertTriangle, CheckCircle,
-  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, XCircle,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -13,6 +13,10 @@ import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
 import { simulationService, SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
+import { FlightCancelModal } from '../components/FlightCancelModal';
+import { RunComparisonModal } from '../components/RunComparisonModal';
+import { ReportRows } from '../components/SummaryReportModal';
+import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 import { localTodayString, formatGmtLabel } from '../lib/timezone';
@@ -439,6 +443,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   useEffect(() => { activePlanesRef.current = activePlanes; }, [activePlanes]);
   const [seenFlights, setSeenFlights] = useState<SeenFlight[]>([]);
 
+  // ── Rutas canceladas — parpadeo temporal en el mapa (D14/D15, LE-62) ──────
+  const [cancelledRoutes, setCancelledRoutes] =
+    useState<{ key: string; flightId: string; fromIcao: string; toIcao: string }[]>([]);
+  const cancelTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const CANCEL_BLINK_MS = 60_000;
+  // Modal de cancelación de vuelos (LE-70/LE-71)
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+
   useEffect(() => {
     const unsubDep = socket.on('FLIGHT_DEPARTED', ({ simTime, payload }: { simTime?: string; payload: any }) => {
       // Intentar múltiples nombres de campo que el backend podría usar
@@ -597,7 +609,30 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setTimeout(() => fetchFlightLoadsRef.current?.(), 800);
     });
 
-    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); unsubBagAssigned(); };
+    // FLIGHT_CANCELLED: quitar el avión si estaba en el aire y hacer parpadear la
+    // ruta afectada durante un tiempo (D14/D15). El payload solo trae flightId —
+    // las ICAO se derivan del propio ID ("SKBO-SEQM-19:00-20260103").
+    const unsubCancelled = socket.on('FLIGHT_CANCELLED', ({ payload }: { payload: any }) => {
+      const fid = payload?.flightId ?? payload?.flightScheduleKey;
+      if (!fid) return;
+      const parts = String(fid).split('-');
+      const fromIcao = payload?.fromIcao ?? parts[0];
+      const toIcao   = payload?.toIcao   ?? parts[1];
+      if (!fromIcao || !toIcao) return;
+
+      setActivePlanes(prev => prev.filter(p => p.flightId !== fid));
+      setSeenFlights(prev => prev.map(f => f.flightId === fid ? { ...f, isActive: false } : f));
+
+      const key = `${fid}-${Date.now()}`;
+      setCancelledRoutes(prev => [...prev.filter(c => c.flightId !== fid), { key, flightId: fid, fromIcao, toIcao }]);
+      const timer = setTimeout(() => {
+        setCancelledRoutes(prev => prev.filter(c => c.key !== key));
+        cancelTimersRef.current.delete(key);
+      }, CANCEL_BLINK_MS);
+      cancelTimersRef.current.set(key, timer);
+    });
+
+    return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); unsubBagAssigned(); unsubCancelled(); };
   }, [socket]);
 
   // ── Restaurar aviones IN_FLIGHT desde snapshot (nueva pestaña / resync) ──
@@ -673,8 +708,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setSelectedFlightId(null);
       setSelectedShipmentId(null);
       setRouteOverlay(null);
+      setCancelledRoutes([]);
+      setCancelModalOpen(false);
       planeTimersRef.current.forEach(t => clearTimeout(t));
       planeTimersRef.current.clear();
+      cancelTimersRef.current.forEach(t => clearTimeout(t));
+      cancelTimersRef.current.clear();
     }
   }, [session]);
 
@@ -683,8 +722,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [selectedScenario, setSelectedScenario] = useState<SimulationScenario>(SCENARIOS.PERIOD_5D);
   const [startDate, setStartDate] = useState('');
   const [startTime, setStartTime] = useState('00:00');
+  const [durationDays, setDurationDays] = useState<3 | 5 | 7>(5); // LE-69
   const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [showCollapseWarning, setShowCollapseWarning] = useState(false);
+  // Comparativa de ejecuciones (LE-76)
+  const [compareOpen, setCompareOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -709,9 +751,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setShowCollapseWarning(true);
       return;
     }
-    await createSession(selectedScenario, startDate, startTime);
+    await createSession(selectedScenario, startDate, startTime, durationDays);
     onConfigClose();
-  }, [selectedScenario, startDate, startTime, createSession, onConfigClose]);
+  }, [selectedScenario, startDate, startTime, durationDays, createSession, onConfigClose]);
 
   const confirmCollapse = useCallback(async () => {
     setShowCollapseWarning(false);
@@ -1040,6 +1082,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const simRunning = session?.status === 'running';
   const hasSession = !!session;
 
+  // Reloj simulado actual (para el panel y para las alertas de riesgo SLA)
+  const currentSimMsVal = useMemo(() => {
+    if (!session?.startTimeAt) return null;
+    if (lastSimUpdate) return lastSimUpdate.simMs;
+    return new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000;
+  }, [session?.startTimeAt, session?.currentTimeAt, lastSimUpdate]);
+
   // Congela la animación de aviones cuando la simulación está en pausa, y la
   // reanuda sin salto. Sin esto los aviones seguían deslizándose con el reloj real.
   useEffect(() => {
@@ -1148,6 +1197,47 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               );
             })}
           </g>
+
+          {/* Rutas canceladas — parpadeo temporal (D14/D15, LE-62) */}
+          {cancelledRoutes.length > 0 && (
+            <g className="cancelled-routes">
+              {cancelledRoutes.map(c => {
+                const o = hubIndex.get(c.fromIcao);
+                const d = hubIndex.get(c.toIcao);
+                if (!o || !d) return null;
+                const dist = Math.sqrt((d.projectedX! - o.projectedX!) ** 2 + (d.projectedY! - o.projectedY!) ** 2);
+                const ccx = (o.projectedX! + d.projectedX!) / 2;
+                const ccy = (o.projectedY! + d.projectedY!) / 2 - dist * 0.2;
+                const midX = 0.25 * o.projectedX! + 0.5 * ccx + 0.25 * d.projectedX!;
+                const midY = 0.25 * o.projectedY! + 0.5 * ccy + 0.25 * d.projectedY!;
+                return (
+                  <g key={c.key}>
+                    <path
+                      d={`M ${o.projectedX} ${o.projectedY} Q ${ccx} ${ccy} ${d.projectedX} ${d.projectedY}`}
+                      stroke="#dc2626"
+                      strokeWidth={1.4 / viewTransform.k}
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeDasharray={`${6 / viewTransform.k} ${4 / viewTransform.k}`}
+                    >
+                      <animate attributeName="opacity" values="0.95;0.15;0.95" dur="1.1s" repeatCount="indefinite" />
+                    </path>
+                    <circle cx={midX} cy={midY} r={6 / viewTransform.k} fill="#dc2626">
+                      <animate attributeName="opacity" values="1;0.3;1" dur="1.1s" repeatCount="indefinite" />
+                    </circle>
+                    <text
+                      x={midX} y={midY + 2.4 / viewTransform.k}
+                      textAnchor="middle" fill="white"
+                      className="pointer-events-none"
+                      style={{ fontSize: `${7 / viewTransform.k}px`, fontWeight: 900 }}
+                    >
+                      ✕
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          )}
 
           {/* Ruta del envío seleccionado (escalas / directo) */}
           {routeOverlay && (
@@ -1605,13 +1695,39 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                           )}
                         </div>
                         <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
-                          {s === SCENARIOS.PERIOD_5D && 'Simula 5 días desde la fecha elegida (~15 min/día)'}
+                          {s === SCENARIOS.PERIOD_5D && 'Simula 3, 5 o 7 días desde la fecha elegida (~90 min reales)'}
                           {s === SCENARIOS.COLLAPSE  && 'Prueba de estrés hasta el colapso'}
                         </p>
                       </div>
                     </label>
                   ))}
                 </div>
+
+                {selectedScenario === SCENARIOS.PERIOD_5D && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest block text-indigo-600">
+                      Duración del periodo (LE-69)
+                    </label>
+                    <div className="flex gap-2">
+                      {([3, 5, 7] as const).map(d => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => setDurationDays(d)}
+                          disabled={isLoading}
+                          className={cn(
+                            'flex-1 py-2 rounded-xl border text-sm font-black transition-colors',
+                            durationDays === d
+                              ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20'
+                              : 'bg-white border-indigo-200 text-indigo-700 hover:bg-indigo-50'
+                          )}
+                        >
+                          {d} días
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {(selectedScenario === SCENARIOS.PERIOD_5D || selectedScenario === SCENARIOS.COLLAPSE) && (
                   <div className="space-y-2">
@@ -1711,6 +1827,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   <div className="flex gap-0.5">{[0,1,2].map(i => <div key={i} className="w-1.5 h-px bg-slate-400" />)}</div>
                   <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
                 </div>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-6 h-px bg-red-600 rounded animate-pulse" />
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta cancelada (parpadea)</span>
+                </div>
                 <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400">
                   Rueda del ratón para zoom · Arrastrar para desplazar
                 </div>
@@ -1726,6 +1846,33 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           )}
         >
           <MapIcon className="w-4 h-4" /> Leyenda
+        </button>
+        {hasSession && (
+          <SlaAlertsButton
+            shipments={simShipmentList}
+            simNowMs={currentSimMsVal}
+            onSelectShipment={(s) => {
+              setInfoPanelOpen(true);
+              setInfoPanelTab('packages');
+              focusOnShipment(s);
+            }}
+          />
+        )}
+        {hasSession && (
+          <button
+            onClick={() => setCancelModalOpen(true)}
+            className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20"
+            title="Inyectar cancelaciones de vuelos (manual o aleatoria)"
+          >
+            <XCircle className="w-4 h-4" /> Cancelar vuelos
+          </button>
+        )}
+        <button
+          onClick={() => setCompareOpen(true)}
+          className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-indigo-600 border border-indigo-200 hover:bg-indigo-50"
+          title="Comparar el desempeño de dos ejecuciones anteriores"
+        >
+          <LayoutGrid className="w-4 h-4" /> Comparar corridas
         </button>
       </div>
 
@@ -1764,12 +1911,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               activeTab={infoPanelTab}
               onTabChange={setInfoPanelTab}
               activeFlightIds={mapActiveFlightIds}
-              currentSimMs={(() => {
-                if (!session?.startTimeAt) return undefined;
-                const base = new Date(session.startTimeAt).getTime();
-                if (lastSimUpdate) return lastSimUpdate.simMs;
-                return base + (session.currentTimeAt || 0) * 3_600_000;
-              })()}
+              currentSimMs={currentSimMsVal ?? undefined}
             />
           </motion.div>
         )}
@@ -1809,26 +1951,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                 </div>
                 <div>
                   <h3 className="text-lg font-black text-white">Simulación Completada</h3>
-                  <p className="text-emerald-200 text-xs font-semibold">Resumen de operaciones</p>
+                  <p className="text-emerald-200 text-xs font-semibold">Reporte de la última planificación estable</p>
                 </div>
               </div>
-              <div className="px-8 py-6 space-y-4">
+              <div className="px-8 py-6 space-y-4 max-h-[60vh] overflow-y-auto custom-scrollbar">
                 {completionReport.error ? (
                   <p className="text-sm text-slate-500 text-center py-4">No se pudo obtener el reporte.</p>
                 ) : (
-                  <div className="space-y-3">
-                    {[
-                      { label: 'Bultos entregados', value: completionReport.deliveredBaggage ?? completionReport.deliveredCount ?? completionReport.baggage?.delivered ?? '—' },
-                      { label: 'Total de bultos', value: completionReport.totalBaggage ?? completionReport.totalCount ?? completionReport.baggage?.total ?? '—' },
-                      { label: 'Vuelos completados', value: completionReport.completedFlights ?? completionReport.flights?.completed ?? '—' },
-                      { label: 'Infracciones SLA', value: completionReport.slaBreaches ?? completionReport.slaBreach ?? completionReport.sla?.breaches ?? '—' },
-                    ].map(row => (
-                      <div key={row.label} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
-                        <span className="text-sm text-slate-600 font-semibold">{row.label}</span>
-                        <span className="text-sm font-black text-slate-900 font-mono">{String(row.value)}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <ReportRows report={completionReport} gmtOffset={gmtOffset} />
                 )}
                 <button
                   onClick={clearCompletionReport}
@@ -1899,6 +2029,16 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
+      <AnimatePresence>
+        {cancelModalOpen && session?.id && (
+          <FlightCancelModal sessionId={session.id} onClose={() => setCancelModalOpen(false)} />
+        )}
+      </AnimatePresence>
+
+      {/* ── MODAL: Comparativa de ejecuciones (LE-76) ────────────────────────── */}
+      {compareOpen && <RunComparisonModal onClose={() => setCompareOpen(false)} />}
 
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 3px; }

@@ -1,13 +1,17 @@
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid,
+  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid, XCircle, FileText,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider';
 import { AnimatedPlane } from '../components/map/AnimatedPlane';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
+import { FlightCancelModal } from '../components/FlightCancelModal';
+import { SummaryReportModal } from '../components/SummaryReportModal';
+import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { simulationService } from '../services/simulationService';
+import { operationsSocket } from '../services/operationsService';
 import type { SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { cn } from '../lib/utils';
 
@@ -49,7 +53,7 @@ function toSimFlight(p: OpsPlane): SimFlight {
 
 export const DailyOperationsView: React.FC = React.memo(() => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
-  const { planes, airports, ops } = useOperationsContext();
+  const { planes, airports, ops, lastSimUpdate } = useOperationsContext();
 
   // ── Envíos y vuelos completos de la sesión de operaciones ────────────────
   const [opsShipments, setOpsShipments] = useState<SimShipment[]>([]);
@@ -103,6 +107,40 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   const [routeOverlay, setRouteOverlay] =
     useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
+
+  // ── Rutas canceladas — parpadeo temporal en el mapa (D14/D15, LE-62) ──────
+  // El avión ya lo quita OperationsProvider al recibir FLIGHT_CANCELLED; aquí
+  // solo se dibuja el aviso visual sobre la ruta afectada.
+  const [cancelledRoutes, setCancelledRoutes] =
+    useState<{ key: string; flightId: string; fromIcao: string; toIcao: string }[]>([]);
+  const cancelTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  // Reporte de la última planificación estable de la operación (G09)
+  const [reportOpen, setReportOpen] = useState(false);
+
+  useEffect(() => {
+    const CANCEL_BLINK_MS = 60_000;
+    const unsub = operationsSocket.on('FLIGHT_CANCELLED', ({ payload }: any) => {
+      const fid = payload?.flightId ?? payload?.flightScheduleKey;
+      if (!fid) return;
+      const parts = String(fid).split('-');
+      const fromIcao = payload?.fromIcao ?? parts[0];
+      const toIcao   = payload?.toIcao   ?? parts[1];
+      if (!fromIcao || !toIcao) return;
+      const key = `${fid}-${Date.now()}`;
+      setCancelledRoutes(prev => [...prev.filter(c => c.flightId !== fid), { key, flightId: fid, fromIcao, toIcao }]);
+      const timer = setTimeout(() => {
+        setCancelledRoutes(prev => prev.filter(c => c.key !== key));
+        cancelTimersRef.current.delete(key);
+      }, CANCEL_BLINK_MS);
+      cancelTimersRef.current.set(key, timer);
+    });
+    return () => {
+      unsub();
+      cancelTimersRef.current.forEach(t => clearTimeout(t));
+      cancelTimersRef.current.clear();
+    };
+  }, []);
 
   // ── Tooltips ─────────────────────────────────────────────────────────────
   const [hubTooltip, setHubTooltip] = useState<{
@@ -433,6 +471,47 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               );
             })}
           </g>
+
+          {/* Rutas canceladas — parpadeo temporal (D14/D15, LE-62) */}
+          {cancelledRoutes.length > 0 && (
+            <g className="cancelled-routes">
+              {cancelledRoutes.map(c => {
+                const o = hubIndex.get(c.fromIcao);
+                const d = hubIndex.get(c.toIcao);
+                if (!o || !d) return null;
+                const dist = Math.sqrt((d.projectedX! - o.projectedX!) ** 2 + (d.projectedY! - o.projectedY!) ** 2);
+                const ccx = (o.projectedX! + d.projectedX!) / 2;
+                const ccy = (o.projectedY! + d.projectedY!) / 2 - dist * 0.2;
+                const midX = 0.25 * o.projectedX! + 0.5 * ccx + 0.25 * d.projectedX!;
+                const midY = 0.25 * o.projectedY! + 0.5 * ccy + 0.25 * d.projectedY!;
+                return (
+                  <g key={c.key}>
+                    <path
+                      d={`M ${o.projectedX} ${o.projectedY} Q ${ccx} ${ccy} ${d.projectedX} ${d.projectedY}`}
+                      stroke="#dc2626"
+                      strokeWidth={1.4 / viewTransform.k}
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeDasharray={`${6 / viewTransform.k} ${4 / viewTransform.k}`}
+                    >
+                      <animate attributeName="opacity" values="0.95;0.15;0.95" dur="1.1s" repeatCount="indefinite" />
+                    </path>
+                    <circle cx={midX} cy={midY} r={6 / viewTransform.k} fill="#dc2626">
+                      <animate attributeName="opacity" values="1;0.3;1" dur="1.1s" repeatCount="indefinite" />
+                    </circle>
+                    <text
+                      x={midX} y={midY + 2.4 / viewTransform.k}
+                      textAnchor="middle" fill="white"
+                      className="pointer-events-none"
+                      style={{ fontSize: `${7 / viewTransform.k}px`, fontWeight: 900 }}
+                    >
+                      ✕
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          )}
 
           {/* Ruta del envío seleccionado (escalas / directo) */}
           {routeOverlay && (
@@ -794,6 +873,10 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                   <div className="flex gap-0.5">{[0,1,2].map(i => <div key={i} className="w-1.5 h-px bg-slate-400" />)}</div>
                   <span className="text-[10px] font-semibold text-slate-600">Ruta disponible</span>
                 </div>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-6 h-px bg-red-600 rounded animate-pulse" />
+                  <span className="text-[10px] font-semibold text-slate-600">Ruta cancelada (parpadea)</span>
+                </div>
                 <div className="pt-1.5 border-t border-slate-100 text-[9px] text-slate-400">
                   Rueda del ratón para zoom · Arrastrar para desplazar
                 </div>
@@ -810,6 +893,35 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         >
           <MapIcon className="w-4 h-4" /> Leyenda
         </button>
+        {ops?.id && (
+          <SlaAlertsButton
+            shipments={opsShipments}
+            simNowMs={lastSimUpdate?.simMs ?? null}
+            onSelectShipment={(s) => {
+              setInfoPanelOpen(true);
+              setInfoPanelTab('packages');
+              focusOnShipment(s);
+            }}
+          />
+        )}
+        {ops?.id && (
+          <button
+            onClick={() => setCancelModalOpen(true)}
+            className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20"
+            title="Inyectar cancelaciones de vuelos (manual o aleatoria)"
+          >
+            <XCircle className="w-4 h-4" /> Cancelar vuelos
+          </button>
+        )}
+        {ops?.id && (
+          <button
+            onClick={() => setReportOpen(true)}
+            className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-slate-700 border border-slate-200 hover:bg-slate-50"
+            title="Reporte de la última planificación estable de la operación"
+          >
+            <FileText className="w-4 h-4" /> Reporte
+          </button>
+        )}
       </div>
 
       {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos ─────────────── */}
@@ -873,6 +985,23 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           <ChevronLeft className="w-4 h-4" />
           <LayoutGrid className="w-4 h-4" />
         </button>
+      )}
+
+      {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
+      <AnimatePresence>
+        {cancelModalOpen && ops?.id && (
+          <FlightCancelModal sessionId={ops.id} onClose={() => setCancelModalOpen(false)} />
+        )}
+      </AnimatePresence>
+
+      {/* ── MODAL: Reporte de la última planificación estable (G09) ──────────── */}
+      {reportOpen && ops?.id && (
+        <SummaryReportModal
+          title="Reporte de operación"
+          subtitle="Última planificación estable — Operación Día a Día"
+          sessionId={ops.id}
+          onClose={() => setReportOpen(false)}
+        />
       )}
 
       <style>{`
