@@ -402,10 +402,14 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   // Filtros y ordenamiento — envíos
   const [pkSort, setPkSort]     = useState<'deadline' | 'status' | 'progress' | 'route'>('deadline');
 
-  // Filtros — paquetes
+  // Filtros — paquetes (LE-46/LE-57/LE-100: ciudad, continente y rango de fechas,
+  // resueltos client-side sobre la lista ya cargada)
   const [pkQuery, setPkQuery]   = useState('');
   const [pkStatus, setPkStatus] = useState('');
   const [pkRoute, setPkRoute]   = useState('');
+  const [pkContinent, setPkContinent] = useState('');
+  const [pkFrom, setPkFrom]     = useState('');
+  const [pkTo, setPkTo]         = useState('');
 
   // Envío cuyo diagnóstico forense está abierto
   const [diagShipmentId, setDiagShipmentId] = useState<string | null>(null);
@@ -415,6 +419,13 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     () => Array.from(new Set(airports.map(a => a.continent).filter(Boolean))).sort(),
     [airports],
   );
+
+  // Índice ICAO → ciudad/continente para filtrar envíos por ciudad o continente
+  const icaoMeta = useMemo(() => {
+    const m = new Map<string, { city: string; continent: string }>();
+    airports.forEach(a => m.set(a.icao, { city: a.city ?? '', continent: a.continent ?? '' }));
+    return m;
+  }, [airports]);
   const filteredAirports = useMemo(() => {
     const q = apQuery.trim().toUpperCase();
     return airports
@@ -483,7 +494,25 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     return shipments
       .filter(s => {
         if (q && !s.shipmentId.toUpperCase().includes(q)) return false;
-        if (r && !s.originIcao.includes(r) && !s.destIcao.includes(r)) return false;
+        if (r) {
+          // Coincide por ICAO o por nombre de ciudad de origen/destino (LE-46/LE-100)
+          const oCity = icaoMeta.get(s.originIcao)?.city.toUpperCase() ?? '';
+          const dCity = icaoMeta.get(s.destIcao)?.city.toUpperCase() ?? '';
+          if (!s.originIcao.includes(r) && !s.destIcao.includes(r) &&
+              !oCity.includes(r) && !dCity.includes(r)) return false;
+        }
+        if (pkContinent) {
+          const oCont = icaoMeta.get(s.originIcao)?.continent ?? '';
+          const dCont = icaoMeta.get(s.destIcao)?.continent ?? '';
+          if (oCont !== pkContinent && dCont !== pkContinent) return false;
+        }
+        if (pkFrom || pkTo) {
+          // Deadline expresado como fecha en la zona horaria del usuario
+          const local = new Date(new Date(s.deadlineUtc).getTime() + gmtOffset * 3_600_000)
+            .toISOString().slice(0, 10);
+          if (pkFrom && local < pkFrom) return false;
+          if (pkTo && local > pkTo) return false;
+        }
         if (pkStatus && shipmentStatus(s, shipmentsInFlight).label !== pkStatus) return false;
         return true;
       })
@@ -508,7 +537,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
             return new Date(a.deadlineUtc).getTime() - new Date(b.deadlineUtc).getTime();
         }
       });
-  }, [shipments, pkQuery, pkRoute, pkStatus, pkSort]);
+  }, [shipments, pkQuery, pkRoute, pkStatus, pkSort, pkContinent, pkFrom, pkTo, icaoMeta, gmtOffset, shipmentsInFlight]);
 
   // Orden con ítem seleccionado siempre primero
   const sortedAirports = useMemo(() => {
@@ -779,7 +808,24 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   { value: 'SIN RUTA',  label: 'Sin ruta' },
                   { value: 'PENDIENTE', label: 'Pendiente' },
                 ]} />
-                <SearchInput value={pkRoute} onChange={setPkRoute} placeholder="Origen / Destino…" />
+                <SearchInput value={pkRoute} onChange={setPkRoute} placeholder="ICAO o ciudad…" />
+                <FilterSelect value={pkContinent} onChange={setPkContinent}
+                  options={[{ value: '', label: 'Continente' }, ...regions.map(r => ({ value: r, label: r }))]} />
+                <div className="flex items-center gap-1" title="Rango de deadline (fecha en tu zona horaria)">
+                  <input
+                    type="date"
+                    value={pkFrom}
+                    onChange={e => setPkFrom(e.target.value)}
+                    className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-[11px] font-semibold text-slate-700 outline-none focus:border-indigo-400"
+                  />
+                  <span className="text-slate-300 text-xs">–</span>
+                  <input
+                    type="date"
+                    value={pkTo}
+                    onChange={e => setPkTo(e.target.value)}
+                    className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-[11px] font-semibold text-slate-700 outline-none focus:border-indigo-400"
+                  />
+                </div>
                 <FilterSelect value={pkSort} onChange={v => setPkSort(v as typeof pkSort)} options={[
                   { value: 'deadline', label: 'Ordenar: Deadline' },
                   { value: 'status',   label: 'Ordenar: Estado' },

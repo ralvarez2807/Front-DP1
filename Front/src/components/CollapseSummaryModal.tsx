@@ -1,6 +1,8 @@
 import React from 'react';
 import { AlertOctagon, X } from 'lucide-react';
 import { CollapseResult } from '../providers/SimulationProvider';
+import { ReportRows } from './SummaryReportModal';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const REASON_LABELS: Record<string, string> = {
   DEADLINE_EXCEEDED: 'Una maleta superó su fecha límite de entrega',
@@ -23,10 +25,11 @@ function fmtDuration(ms: number, unitsLabel: [string, string]): string {
  * real tomó llegar a ese punto.
  */
 export function CollapseSummaryModal({ result, onClose }: { result: CollapseResult; onClose: () => void }) {
+  const gmtOffset = useUserTimezone();
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm p-6" onClick={onClose}>
       <div
-        className="bg-white rounded-3xl border border-rose-200 shadow-2xl max-w-md w-full overflow-hidden"
+        className="bg-white rounded-3xl border border-rose-200 shadow-2xl max-w-md w-full overflow-hidden max-h-[85vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="bg-rose-600 px-8 py-6 flex items-center gap-4">
@@ -42,7 +45,7 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
           </button>
         </div>
 
-        <div className="px-8 py-6 space-y-5">
+        <div className="px-8 py-6 space-y-5 overflow-y-auto custom-scrollbar">
           <p className="text-sm text-slate-700 leading-relaxed">
             {REASON_LABELS[result.reason] ?? result.reason}
             {result.baggageId && <> (maleta <span className="font-mono font-bold">{result.baggageId}</span>)</>}
@@ -58,6 +61,16 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
               <p className="text-base font-black text-slate-900">{fmtDuration(result.realElapsedMs, ['minuto', 'minutos'])}</p>
             </div>
           </div>
+
+          {/* Reporte de la última planificación estable al momento del colapso (G10) */}
+          {result.report && (
+            <div className="border-t border-slate-100 pt-4">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                Última planificación estable
+              </p>
+              <ReportRows report={result.report} gmtOffset={gmtOffset} />
+            </div>
+          )}
 
           <button
             onClick={onClose}

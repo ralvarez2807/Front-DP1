@@ -40,7 +40,10 @@ function AppContent() {
     collapseResult, clearCollapseResult,
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
   } = useSimulationContext();
-  const { metrics: opsMetrics, activeFlightCount, connected: opsConnected } = useOperationsContext();
+  const {
+    metrics: opsMetrics, activeFlightCount, connected: opsConnected,
+    ops: opsStatus, lastSimUpdate: opsLastSimUpdate, totalOrders,
+  } = useOperationsContext();
   const { job: bulkJob, dismissJob: dismissBulkJob } = useBulkUploadContext();
 
   // El botón "Cerrar" del cuadrito flotante de carga masiva solo lo oculta — no
@@ -77,10 +80,13 @@ function AppContent() {
     return () => clearInterval(id);
   }, [sessionStartedAt, session?.id, activeView]);
 
-  const formatSimElapsed = (totalHours: number) => {
-    const d = Math.floor(totalHours / 24);
-    const h = totalHours % 24;
-    return d > 0 ? `${d}d ${h}h` : `${h}h`;
+  // Transcurrido al minuto (C13/C15 del checklist docente)
+  const formatElapsedMs = (ms: number) => {
+    const totalMin = Math.max(0, Math.floor(ms / 60_000));
+    const d = Math.floor(totalMin / 1_440);
+    const h = Math.floor((totalMin % 1_440) / 60);
+    const m = totalMin % 60;
+    return d > 0 ? `${d}d ${h}h ${String(m).padStart(2, '0')}m` : `${h}h ${String(m).padStart(2, '0')}m`;
   };
   const formatRealElapsed = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -113,15 +119,41 @@ function AppContent() {
     return () => clearInterval(id);
   }, []);
 
-  // La fecha simulada solo aparece cuando el usuario está en la pestaña de Simulación.
-  // En cualquier otra pestaña (incluida Operación Diaria) siempre muestra la hora real.
-  const displayDate = useMemo(() => {
-    if (activeView !== 'simulation' || !session?.startTimeAt) return now;
-    if (lastSimUpdate && session.status === 'running') {
-      return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * session.speedFactor);
+  // Momento simulado de la sesión manual, al minuto (C12). Cuando la sesión está
+  // pausada se congela en el último evento recibido — extrapolar con el speedFactor
+  // mostraría una hora que no corresponde.
+  const simNowDate = useMemo(() => {
+    if (!session?.startTimeAt) return null;
+    if (lastSimUpdate) {
+      if (session.status === 'running') {
+        return new Date(lastSimUpdate.simMs + (now.getTime() - lastSimUpdate.realMs) * session.speedFactor);
+      }
+      return new Date(lastSimUpdate.simMs);
     }
     return new Date(new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000);
-  }, [now, session, lastSimUpdate, activeView]);
+  }, [now, session, lastSimUpdate]);
+
+  // Momento simulado de la Operación Día a Día (C12 en el escenario de Operaciones).
+  // Con speedFactor 1 corre pegado al reloj real, pero es el reloj propio de la sesión.
+  const opsSimNowDate = useMemo(() => {
+    if (!opsLastSimUpdate) return null;
+    const sf = opsStatus?.speedFactor || 1;
+    return new Date(opsLastSimUpdate.simMs + (now.getTime() - opsLastSimUpdate.realMs) * sf);
+  }, [now, opsLastSimUpdate, opsStatus?.speedFactor]);
+
+  // Transcurridos de la Operación Día a Día desde el arranque de la sesión (C13/C15)
+  const opsSimStartMs = opsStatus?.simStart ? new Date(opsStatus.simStart).getTime() : null;
+  const opsSimElapsedMs = opsSimNowDate && opsSimStartMs != null
+    ? opsSimNowDate.getTime() - opsSimStartMs
+    : null;
+  const opsRealElapsedMs = opsLastSimUpdate && opsSimStartMs != null
+    ? now.getTime() - (opsLastSimUpdate.realMs - (opsLastSimUpdate.simMs - opsSimStartMs) / (opsStatus?.speedFactor || 1))
+    : null;
+
+  // Transcurrido simulado de la sesión manual, al minuto
+  const simElapsedMs = simNowDate && session?.startTimeAt
+    ? simNowDate.getTime() - new Date(session.startTimeAt).getTime()
+    : null;
 
   // ── Rutas activas ────────────────────────────────────────────────────────
   const activeRoutes = useMemo(() => {
@@ -137,10 +169,6 @@ function AppContent() {
     });
     return active;
   }, [shipments, flights]);
-
-  const time = session?.currentTimeAt || 0;
-  const day  = Math.floor(time / 24) + 1;
-  const hour = time % 24;
 
   const isFullScreen = activeView === 'dashboard' || activeView === 'simulation';
 
@@ -199,18 +227,28 @@ function AppContent() {
         {/* HEADER */}
         <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md shrink-0 z-40">
           <div className="h-16 flex items-center justify-between px-8">
-            {/* Reloj simulado / real */}
-            <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-xl border border-slate-200">
+            {/* Relojes (C12–C16): momento real siempre; momento simulado en las vistas con sesión en vivo */}
+            <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
               <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
-              <div className="flex flex-col leading-none">
-                <span className="tabular-nums font-black text-slate-900 text-sm tracking-wide">
-                  {formatUserDate(displayDate, gmtOffset)}
+              <div className="flex flex-col leading-tight">
+                <span className="tabular-nums font-mono text-xs text-slate-900">
+                  <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-slate-400">Real</span>
+                  <span className="font-black">{formatUserDate(now, gmtOffset)} · {formatUserTime(now, gmtOffset)}</span>
+                  <span className="ml-1 text-slate-400 font-sans text-[10px]">({formatGmtLabel(gmtOffset)})</span>
                 </span>
-                <span className="tabular-nums font-mono text-slate-500 text-xs mt-0.5">
-                  {formatUserTime(displayDate, gmtOffset)}
-                  <span className="ml-1 text-slate-400 font-sans">({formatGmtLabel(gmtOffset)})</span>
-                  {session && activeView === 'simulation' && <span className="ml-1.5 text-indigo-400 font-bold">(simulado)</span>}
-                </span>
+                {activeView === 'simulation' && simNowDate && (
+                  <span className="tabular-nums font-mono text-xs text-indigo-700 mt-0.5">
+                    <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-indigo-400">Sim</span>
+                    <span className="font-black">{formatUserDate(simNowDate, gmtOffset)} · {formatUserTime(simNowDate, gmtOffset)}</span>
+                    {session?.status === 'paused' && <span className="ml-1 text-amber-500 font-sans text-[10px] font-bold">(pausado)</span>}
+                  </span>
+                )}
+                {activeView === 'dashboard' && opsSimNowDate && (
+                  <span className="tabular-nums font-mono text-xs text-indigo-700 mt-0.5">
+                    <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-indigo-400">Sim</span>
+                    <span className="font-black">{formatUserDate(opsSimNowDate, gmtOffset)} · {formatUserTime(opsSimNowDate, gmtOffset)}</span>
+                  </span>
+                )}
               </div>
             </div>
 
@@ -223,15 +261,28 @@ function AppContent() {
                     {opsConnected ? 'Conectado' : 'Reconectando…'}
                   </span>
                 </div>
+                {opsSimElapsedMs != null && (
+                  <>
+                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    <SimStat label="T. Simulado" value={formatElapsedMs(opsSimElapsedMs)}                    className="text-indigo-700" />
+                    <SimStat label="T. Real"     value={formatElapsedMs(opsRealElapsedMs ?? opsSimElapsedMs)} className="text-emerald-700" />
+                  </>
+                )}
                 {opsMetrics && (
                   <>
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    {totalOrders != null && (
+                      <SimStat label="Pedidos tot."    value={totalOrders.toLocaleString()}            className="text-slate-700" />
+                    )}
                     <SimStat label="Entregadas"        value={opsMetrics.delivered}                    className="text-emerald-700" />
                     <SimStat label="Sin ruta asig."   value={opsMetrics.pending}                      className="text-amber-700" />
                     <SimStat label="En tránsito"      value={activeFlightCount}                       className="text-blue-700" />
                     <SimStat label="Con ruta asig."   value={opsMetrics.assigned}                     className="text-indigo-700" />
                     <SimStat label="SLA venc."        value={opsMetrics.slaBreaches}                  className="text-red-600" />
                     <SimStat label="Bultos/hora"      value={opsMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                    <OccupancyStat label="Ocup. flota"  pct={opsMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
+                    <OccupancyStat label="Ocup. almac." pct={opsMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
                   </>
                 )}
               </div>
@@ -247,8 +298,8 @@ function AppContent() {
                       <span className="text-[9px] font-mono text-slate-400 hidden sm:block">{session.id.substring(0, 10)}…</span>
                     </div>
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
-                    <SimStat label="T. Simulado" value={formatSimElapsed(session.currentTimeAt || 0)} className="text-indigo-700" />
-                    <SimStat label="T. Real"     value={formatRealElapsed(elapsedRealMs)}             className="text-emerald-700" />
+                    <SimStat label="T. Simulado" value={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'} className="text-indigo-700" />
+                    <SimStat label="T. Real"     value={formatRealElapsed(elapsedRealMs)}                               className="text-emerald-700" />
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
                     <div className="flex gap-1 shrink-0">
                       <button
@@ -287,6 +338,9 @@ function AppContent() {
                         <SimStat label="Con ruta asig." value={dashboardMetrics.assigned}                     className="text-indigo-700" />
                         <SimStat label="SLA venc."      value={dashboardMetrics.slaBreaches}                  className="text-red-600" onClick={session?.id ? () => setSlaModalOpen(true) : undefined} />
                         <SimStat label="Bultos/hora"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
+                        <div className="h-7 w-px bg-slate-200 shrink-0" />
+                        <OccupancyStat label="Ocup. flota"  pct={dashboardMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
+                        <OccupancyStat label="Ocup. almac." pct={dashboardMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
                       </>
                     )}
                   </>
@@ -362,6 +416,12 @@ function AppContent() {
                           <MetricCard icon={<CheckCircle className="w-4 h-4" />} label="Con ruta asig." value={dashboardMetrics.assigned} color="indigo" />
                           <MetricCard icon={<AlertTriangle className="w-4 h-4" />} label="SLA vencidas" value={dashboardMetrics.slaBreaches} color="red" />
                           <MetricCard icon={<TrendingUp className="w-4 h-4" />} label="Rendim./h" value={dashboardMetrics.throughputPerHour.toFixed(1)} color="violet" />
+                          <MetricCard icon={<Plane className="w-4 h-4" />} label="Ocup. flota"
+                            value={dashboardMetrics.fleetOccupancyPct != null ? `${dashboardMetrics.fleetOccupancyPct.toFixed(1)}%` : '—'}
+                            color={occupancyCardColor(dashboardMetrics.fleetOccupancyPct)} />
+                          <MetricCard icon={<Warehouse className="w-4 h-4" />} label="Ocup. almac."
+                            value={dashboardMetrics.airportOccupancyPct != null ? `${dashboardMetrics.airportOccupancyPct.toFixed(1)}%` : '—'}
+                            color={occupancyCardColor(dashboardMetrics.airportOccupancyPct)} />
                         </div>
                       ) : (
                         <div className="p-6 text-center text-sm text-slate-400">
@@ -373,11 +433,9 @@ function AppContent() {
                       <div className="px-5 pb-4 pt-1 border-t border-slate-100 flex items-center justify-between">
                         <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-widest">Tiempo simulado</span>
                         <span className="text-xs font-black font-mono text-indigo-700">
-                          {session.currentTimeAt
-                            ? `${Math.floor(session.currentTimeAt / 24)}d ${session.currentTimeAt % 24}h`
-                            : '0h'}
+                          {simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
                           {' · '}
-                          {formatUserDayTime(displayDate, gmtOffset)} ({formatGmtLabel(gmtOffset)})
+                          {formatUserDayTime(simNowDate ?? now, gmtOffset)} ({formatGmtLabel(gmtOffset)})
                         </span>
                       </div>
 
@@ -654,7 +712,7 @@ function NavItem({ active, icon, label, onClick }: {
   );
 }
 
-type MetricColor = 'emerald' | 'amber' | 'blue' | 'indigo' | 'red' | 'violet';
+type MetricColor = 'emerald' | 'amber' | 'blue' | 'indigo' | 'red' | 'violet' | 'slate';
 const COLOR_MAP: Record<MetricColor, string> = {
   emerald: 'bg-emerald-50 text-emerald-700 border-emerald-100',
   amber:   'bg-amber-50   text-amber-700   border-amber-100',
@@ -662,7 +720,39 @@ const COLOR_MAP: Record<MetricColor, string> = {
   indigo:  'bg-indigo-50  text-indigo-700  border-indigo-100',
   red:     'bg-red-50     text-red-700     border-red-100',
   violet:  'bg-violet-50  text-violet-700  border-violet-100',
+  slate:   'bg-slate-50   text-slate-600   border-slate-200',
 };
+
+// ── Semáforo de los indicadores globales LE-101/LE-102 (G01–G04) ─────────────
+// Umbrales alineados con el occupancyLevel del backend: EMPTY = 0 %, GREEN ≤ 60 %,
+// AMBER ≤ 85 %, RED > 85 %. "Vacío" se distingue del verde (pedido del docente).
+function occupancyVisual(pct: number | null | undefined): { dot: string; text: string; label: string } {
+  if (pct == null || isNaN(pct)) return { dot: 'bg-slate-300',   text: 'text-slate-400',   label: 'Sin datos' };
+  if (pct <= 0)                  return { dot: 'bg-slate-300',   text: 'text-slate-500',   label: 'Vacío' };
+  if (pct <= 60)                 return { dot: 'bg-emerald-500', text: 'text-emerald-700', label: 'Óptimo' };
+  if (pct <= 85)                 return { dot: 'bg-amber-500',   text: 'text-amber-700',   label: 'Alerta' };
+  return                                { dot: 'bg-red-500',     text: 'text-red-600',     label: 'Crítico' };
+}
+
+function occupancyCardColor(pct: number | null | undefined): MetricColor {
+  if (pct == null || isNaN(pct) || pct <= 0) return 'slate';
+  if (pct <= 60) return 'emerald';
+  if (pct <= 85) return 'amber';
+  return 'red';
+}
+
+function OccupancyStat({ label, pct, title }: { label: string; pct?: number | null; title?: string }) {
+  const v = occupancyVisual(pct);
+  return (
+    <div className="flex flex-col leading-tight px-1 shrink-0" title={title ? `${title} — ${v.label}` : v.label}>
+      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
+      <span className={cn('text-sm font-black font-mono leading-tight flex items-center gap-1', v.text)}>
+        <span className={cn('w-2 h-2 rounded-full shrink-0', v.dot, pct != null && pct > 85 && 'animate-pulse')} />
+        {pct == null || isNaN(pct) ? '—' : `${pct.toFixed(1)}%`}
+      </span>
+    </div>
+  );
+}
 
 function SimStat({ label, value, className, onClick }: { label: string; value: React.ReactNode; className?: string; onClick?: () => void }) {
   return (

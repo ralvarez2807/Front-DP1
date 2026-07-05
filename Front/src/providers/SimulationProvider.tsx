@@ -7,6 +7,7 @@ import { simulationService } from '../services/simulationService';
 import { SimulationSession, OperationalEvent, CriticalPoint } from '../models/operational';
 import { SCENARIOS, SimulationScenario } from '../constants/domain';
 import { localInputToUtcIso } from '../lib/timezone';
+import { saveRun } from '../lib/runHistory';
 import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const BACKEND_EVENTS = [
@@ -47,11 +48,12 @@ function computeDateRange(
   startDate: string,
   startTime: string = '00:00',
   gmtOffset: number = 0,
+  durationDays: number = 5,
 ): { simStart: string; simEnd: string } {
   const start = new Date(localInputToUtcIso(startDate, startTime, gmtOffset));
   const end   = new Date(start);
   if (scenario === SCENARIOS.PERIOD_5D) {
-    end.setUTCDate(end.getUTCDate() + 5);
+    end.setUTCDate(end.getUTCDate() + durationDays); // LE-69: duración elegible (3/5/7)
   } else if (scenario === SCENARIOS.COLLAPSE) {
     end.setUTCDate(end.getUTCDate() + 30);
   } else {
@@ -63,6 +65,9 @@ function computeDateRange(
 export interface DashboardMetrics {
   simTime: string; delivered: number; pending: number; assigned: number;
   inFlight: number; slaBreaches: number; throughputPerHour: number;
+  // Indicadores globales LE-101/LE-102 — el backend manda el % crudo, el semáforo lo pinta el front
+  fleetOccupancyPct?: number;
+  airportOccupancyPct?: number;
 }
 
 export interface CollapseResult {
@@ -73,6 +78,8 @@ export interface CollapseResult {
   consecutiveCycles: number;
   simElapsedMs: number;
   realElapsedMs: number;
+  // Reporte de la última planificación estable (G10) — llega asíncrono, best effort
+  report?: any | null;
 }
 
 interface SimulationContextType {
@@ -90,7 +97,7 @@ interface SimulationContextType {
   collapseResult: CollapseResult | null;
   clearCollapseResult: () => void;
   dashboardMetrics: DashboardMetrics | null;
-  createSession: (scenario: SimulationScenario, startDate: string, startTime?: string) => Promise<void>;
+  createSession: (scenario: SimulationScenario, startDate: string, startTime?: string, durationDays?: number) => Promise<void>;
   startSimulation: () => Promise<void>;
   pauseSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
@@ -201,9 +208,15 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         // Capturar el ID antes de limpiar la sesión
         setSession(prev => {
           if (prev?.id && status === 'completed') {
-            // Fetch asíncrono del reporte — no bloquea el render
-            simulationService.getSummaryReport(prev.id)
-              .then(report => setCompletionReport(report))
+            const runId = prev.id;
+            const scenario = prev.config?.scenario ?? 'period_5d';
+            // Fetch asíncrono del reporte — no bloquea el render. Además se guarda
+            // en el historial local para la comparativa de ejecuciones (LE-76).
+            simulationService.getSummaryReport(runId)
+              .then(report => {
+                setCompletionReport(report);
+                saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'completed', report });
+              })
               .catch(() => setCompletionReport({ error: true }));
           }
           return null;
@@ -232,6 +245,8 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   useEffect(() => {
     if (!session?.startTimeAt) return;
     const startTimeAt = session.startTimeAt;
+    const sessionId   = session.id;
+    const scenario    = session.config?.scenario ?? 'collapse';
 
     const unsub = socket.on('COLLAPSE_DETECTED', ({ payload }: { payload: {
       simTime: string; reason: string; baggageId: string; deadline: string; consecutiveCycles: number;
@@ -248,6 +263,16 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         simElapsedMs,
         realElapsedMs,
       });
+      // Reporte de la última planificación estable al colapsar (G10) — best effort,
+      // el backend detiene la sesión justo después de emitir el evento.
+      simulationService.getSummaryReport(sessionId)
+        .then(report => {
+          setCollapseResult(prev => prev ? { ...prev, report } : prev);
+          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
+        })
+        .catch(() => {
+          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report: null });
+        });
       socketService.disconnect();
       localStorage.removeItem('simulation_config');
       setSession(null);
@@ -256,7 +281,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setLastSimUpdate(null);
     });
     return unsub;
-  }, [socket, session?.startTimeAt, sessionStartedAt]);
+  }, [socket, session, sessionStartedAt]);
 
   // ── Resync por gap en seq del WebSocket ───────────────────────────────────
   useEffect(() => {
@@ -334,11 +359,11 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.status]);
 
-  const createSession = useCallback(async (scenario: SimulationScenario, startDate: string, startTime: string = '00:00') => {
+  const createSession = useCallback(async (scenario: SimulationScenario, startDate: string, startTime: string = '00:00', durationDays: number = 5) => {
     setIsLoading(true);
     const controller = new AbortController();
     try {
-      const { simStart, simEnd } = computeDateRange(scenario, startDate, startTime, gmtOffset);
+      const { simStart, simEnd } = computeDateRange(scenario, startDate, startTime, gmtOffset, durationDays);
       const config = { scenario, speed: 1 };
       localStorage.setItem('simulation_config', JSON.stringify(config));
       let newSession: SimulationSession;

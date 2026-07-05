@@ -63,7 +63,12 @@ src/
     DailyOperationsView.tsx     — mapa en vivo de operación diaria (misma UI que simulación,
                                    importa AnimatedPlane de components/map)
     OrderUploadView.tsx         — pestaña "Órdenes": alta manual + carga masiva por archivo
-    AirportManagerView.tsx      — pestaña "Aeropuertos": tabla de gestión (solo lectura de datos)
+    AirportManagerView.tsx      — pestaña "Aeropuertos": gestor de red — alta unitaria de
+                                   aeropuertos y vuelos, edición de capacidad de almacén y de
+                                   horario/capacidad de vuelo (ver sección "Exigencias v2.0")
+    TrackingView.tsx            — pestaña "Tracking": consulta puntual de maleta contra la sesión
+                                   en vivo (ops o sim): estado, ruta e historial LE-45. Reescrita —
+                                   antes usaba endpoints /v1/baggage/* que NO existen en el backend
   components/
     map/AnimatedPlane.tsx — avión animado a lo largo de un arco Bézier (usado solo por DailyOperationsView)
     AvailableDayPicker.tsx — calendario de selección de fecha (fechas del dataset, reutilizado en config de simulación)
@@ -75,6 +80,7 @@ src/
   lib/
     ordersFile.ts         — parser de archivos de carga masiva (dos formatos, ver sección abajo)
     timezone.ts           — formateo/conversión hora local↔UTC (ver sección "Zona horaria")
+    runHistory.ts         — historial local (localStorage) de reportes finales de corridas (LE-76)
     utils.ts              — cn() (clsx + tailwind-merge)
   models/
     infrastructure.ts     — Hub (incluye gmtOffset), Flight
@@ -441,3 +447,62 @@ Se limpia al detener la simulación.
   - El reloj de cabecera (`App.tsx`, compartido entre Día a Día y Simulación) muestra el `GMT±N`
     entre paréntesis junto a la hora (`formatGmtLabel`), para dejar explícito que es hora local de
     la cuenta y no UTC.
+
+## Exigencias v2.0 (jul-2026) — funcionalidades agregadas
+
+Implementadas contra el backlog de `Back-DP1/Simulador/docs/Exigencias_consolidadas.xlsx`.
+Varios endpoints usados aquí están en la sección 15 de `Back-DP1/Simulador/docs/APIS.md`
+(**plan del backend, se asumen implementados**): `POST /admin/airports/single`,
+`POST /admin/flights/single`, `PUT /admin/flights/:scheduleId`, `GET .../baggage/:id/history`,
+`/disruptions` con `scheduleId` + `/disruptions/bulk`, `GET /operations/orders/count`, y
+`fleetOccupancyPct`/`airportOccupancyPct` en el dashboard. Si algo devuelve 404/400, revisar
+primero si ese endpoint ya existe en el backend.
+
+- **Indicadores globales (LE-101/102, G01–G04):** `OccupancyStat` en el header (`App.tsx`) para
+  Simulación y Día a Día + tarjetas en el panel desplegable. El backend manda el % crudo; el
+  semáforo lo pinta el front con los umbrales del `occupancyLevel` del backend (0 vacío, ≤60
+  verde, ≤85 ámbar, >85 rojo). Los campos son opcionales en `DashboardMetrics`/`OpsMetrics`
+  (muestran "—" si el backend aún no los manda).
+- **Relojes C12–C16:** el bloque de reloj del header muestra SIEMPRE el momento real y, en las
+  vistas con sesión (Simulación y Dashboard/ops), el momento simulado al minuto en una segunda
+  fila. El simulado se CONGELA al pausar (antes extrapolaba mal). Transcurridos simulado/real al
+  minuto en ambas vistas (`formatElapsedMs`).
+- **Cancelaciones (LE-70/71, D14/D15):** `components/FlightCancelModal.tsx` (compartido por ambas
+  vistas de mapa, botón "Cancelar vuelos"): selección manual con búsqueda o sorteo aleatorio
+  client-side de N horarios; 1 → `injectCancellation`, varios → `injectCancellationsBulk`
+  (`scheduleId` sin fecha; el backend resuelve hoy/mañana con la regla de 1 h). Al llegar
+  `FLIGHT_CANCELLED` por WS, ambas vistas pintan la ruta afectada **parpadeando en rojo 60 s**
+  (`cancelledRoutes` + `<animate>` SVG) y la vista de simulación además quita el avión
+  (OperationsProvider ya lo hacía para ops). Las ICAO se derivan del propio `flightId` si el
+  payload no las trae.
+- **Gestor de red (LE-10/12/13/14/15/17):** `AirportManagerView` ahora tiene dos secciones
+  (Aeropuertos / Vuelos) con alta unitaria (modales) y edición inline de capacidad de almacén y
+  de horario/capacidad de vuelo (`services/adminService.ts`). Editar un vuelo puede cambiar su
+  `id` (formato `ORIG-DEST-HH:mm`) — la fila se reemplaza por `previousId`. El mapa
+  (`MapProvider`) solo carga aeropuertos/rutas al login: lo nuevo aparece al recargar la página
+  (avisado en el toast).
+- **Contador de pedidos (LE-36):** `OperationsProvider.totalOrders` — polling de
+  `GET /operations/orders/count` cada 30 s + refresh al recibir `SHIPMENT_CREATED`. SimStat
+  "Pedidos tot." en el header del Dashboard.
+- **Tracking + historial (LE-45):** `TrackingView` reescrita contra los endpoints reales
+  (`getBaggage`/`getBaggageRoute`/`getBaggageHistory` en `simulationService`), con selector de
+  ámbito ops/sim. Ruta e historial se piden con `Promise.allSettled` — si `/history` aún no está
+  implementado, la vista lo dice sin romper el resto.
+- **Filtros avanzados (LE-46/57/100):** en la pestaña Paquetes de `SimulationInfoPanel`, el campo
+  "ICAO o ciudad" también matchea nombre de ciudad, y se agregaron continente y rango de fechas
+  del deadline (interpretadas en la zona del usuario). Todo client-side (no hay query params en
+  el plan del backend).
+- **Duración 3/5/7 días (LE-69):** selector en el panel de configuración. `speedFactor = días×16`
+  (3→48, 5→80 histórico, 7→112) para que toda corrida dure ~90 min reales (LE-73).
+- **Reportes de cierre (G08–G10):** el modal "Simulación Completada" ahora usa los campos REALES
+  de `/reports/summary` vía `ReportRows` (antes leía `deliveredBaggage` etc., que no existen, y
+  mostraba "—"). El modal de colapso agrega la última planificación estable (fetch best-effort al
+  detectar el colapso). Botón "Reporte" en Día a Día (`SummaryReportModal`).
+- **Comparativa (LE-76):** el reporte final de cada corrida se guarda en localStorage
+  (`lib/runHistory.ts`, key `sim_run_history`, máx. 12) al completarse/colapsar — necesario
+  porque el backend libera la sesión al terminar y `/reports/summary` deja de responder. Botón
+  "Comparar corridas" (`RunComparisonModal`) en la vista de simulación.
+- **Alertas de riesgo SLA (LE-84/85):** `components/SlaAlertsButton.tsx` en ambas vistas de mapa.
+  El umbral lo calcula el FRONT (decisión del Excel): "por vencer" = deadline a ≤2 h simuladas
+  (`SLA_RISK_WINDOW_MINUTES`) sin entregar ni vencer; "plan tardío" = `late > 0`. Clic en una
+  alerta enfoca el envío en el mapa (misma `focusOnShipment` del panel).

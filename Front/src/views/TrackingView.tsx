@@ -1,161 +1,268 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, MapPin, CheckCircle, AlertTriangle } from 'lucide-react';
-import { baggageService } from '../services/baggageService';
-import { FullTrackingData } from '../models/operational';
+import {
+  Search, MapPin, CheckCircle, AlertTriangle, Plane, Clock, History, Route as RouteIcon,
+} from 'lucide-react';
+import {
+  simulationService, BaggageState, BaggageRouteLeg, BaggageHistoryEntry,
+} from '../services/simulationService';
+import { useOperationsContext } from '../providers/OperationsProvider';
+import { useSimulationContext } from '../providers/SimulationProvider';
+import { formatUserDayTime } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 import { cn } from '../lib/utils';
 
+// Tracking puntual de una maleta contra la sesión en vivo (LE-45/LE-49/LE-66/LE-68):
+// estado y ubicación actual, ruta con escalas y el historial de cambios de estado.
+// Busca en la Operación Día a Día o en la simulación activa del usuario.
+
+type Scope = 'ops' | 'sim';
+
+const STATUS_META: Record<string, { label: string; cls: string }> = {
+  PENDING:   { label: 'SIN RUTA',   cls: 'bg-red-100 text-red-700' },
+  WAITING:   { label: 'EN ALMACÉN', cls: 'bg-amber-100 text-amber-700' },
+  IN_FLIGHT: { label: 'EN VUELO',   cls: 'bg-indigo-100 text-indigo-700' },
+  DELIVERED: { label: 'ENTREGADA',  cls: 'bg-emerald-100 text-emerald-700' },
+};
+
+const LEG_META: Record<string, { label: string; dot: string }> = {
+  ARRIVED:  { label: 'Recorrido', dot: 'bg-emerald-500' },
+  DEPARTED: { label: 'En vuelo ahora', dot: 'bg-amber-500' },
+  PLANNED:  { label: 'Planificado', dot: 'bg-blue-400' },
+};
+
 export const TrackingView: React.FC = () => {
+  const gmtOffset = useUserTimezone();
+  const { ops } = useOperationsContext();
+  const { session } = useSimulationContext();
+
+  const [scope, setScope] = useState<Scope>('ops');
   const [searchId, setSearchId] = useState('');
-  const [trackingData, setTrackingData] = useState<FullTrackingData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [baggage, setBaggage] = useState<BaggageState | null>(null);
+  const [legs, setLegs] = useState<BaggageRouteLeg[]>([]);
+  const [history, setHistory] = useState<BaggageHistoryEntry[] | null>(null);
 
-  const handleSearch = useCallback(async (e?: React.FormEvent, signal?: AbortSignal) => {
+  const sessionId = scope === 'sim' ? session?.id ?? null : ops?.id ?? null;
+
+  const handleSearch = useCallback(async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!searchId) return;
+    const bid = searchId.trim();
+    if (!bid || !sessionId) return;
 
     setIsLoading(true);
     setError(null);
     try {
-      const data = await baggageService.getTracking(searchId, signal);
-      setTrackingData(data);
+      const state = await simulationService.getBaggage(sessionId, bid);
+      setBaggage(state);
+      // Ruta e historial en paralelo, tolerantes a fallo individual
+      const [routeRes, histRes] = await Promise.allSettled([
+        simulationService.getBaggageRoute(sessionId, bid),
+        simulationService.getBaggageHistory(sessionId, bid),
+      ]);
+      setLegs(routeRes.status === 'fulfilled' ? routeRes.value.legs : []);
+      setHistory(histRes.status === 'fulfilled' ? histRes.value : null);
     } catch (err: any) {
-      if (err.name === 'AbortError') return;
-      setError(err.message || 'No se encontró el bulto solicitado.');
-      setTrackingData(null);
+      setError(err?.statusCode === 404
+        ? `La maleta "${bid}" no existe en ${scope === 'sim' ? 'la simulación activa' : 'la operación día a día'}.`
+        : (err?.message || 'No se pudo consultar la maleta.'));
+      setBaggage(null);
+      setLegs([]);
+      setHistory(null);
     } finally {
       setIsLoading(false);
     }
-  }, [searchId]);
+  }, [searchId, sessionId, scope]);
 
-  useEffect(() => {
-    return () => {
-      // Cleanup on unmount
-    };
-  }, []);
+  const st = baggage ? (STATUS_META[baggage.status] ?? { label: baggage.status, cls: 'bg-slate-100 text-slate-600' }) : null;
 
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0, scale: 0.98 }}
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.98 }}
-      className="max-w-4xl mx-auto space-y-8 pb-20"
+      className="max-w-4xl mx-auto space-y-6 pb-20"
     >
-      <div className="text-center space-y-4">
-        <h2 className="text-3xl font-black text-slate-900 tracking-tight">Enterprise Baggage Tracking</h2>
+      <div className="text-center space-y-3">
+        <h2 className="text-3xl font-black text-slate-900 tracking-tight">Tracking de Maletas</h2>
         <p className="text-slate-500 text-sm max-w-lg mx-auto leading-relaxed">
-          Sincronización en tiempo real con los checkpoints operativos de la red global.
+          Ubicación en tiempo real, ruta con escalas e historial de cambios de estado.
         </p>
       </div>
 
-      <div className="relative group">
-        <form onSubmit={handleSearch} className="flex gap-4 p-2 bg-white border border-slate-200 rounded-3xl shadow-xl shadow-blue-600/5 focus-within:border-blue-500 transition-all">
-          <div className="flex-1 flex items-center gap-4 px-6">
-            <Search size={24} className="text-slate-400 group-focus-within:text-blue-600 transition-colors" />
-            <input 
-              type="text" 
-              placeholder="Ingrese Tracking ID (Ej: B2B-XXXXXXXX)" 
-              value={searchId}
-              onChange={(e) => setSearchId(e.target.value.toUpperCase())}
-              className="w-full bg-transparent outline-none text-lg font-bold text-slate-900 placeholder:text-slate-300"
-            />
-          </div>
-          <button 
-            type="submit"
-            disabled={isLoading}
-            className="px-10 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-black text-sm uppercase tracking-widest transition-all active:scale-[0.98] disabled:bg-slate-300"
-          >
-            {isLoading ? 'Rastreando...' : 'Rastrear'}
-          </button>
-        </form>
+      {/* Ámbito de búsqueda */}
+      <div className="flex justify-center gap-1.5 bg-slate-100 p-1 rounded-xl w-fit mx-auto">
+        <button
+          onClick={() => setScope('ops')}
+          className={cn(
+            'px-4 py-2 rounded-lg text-xs font-black transition-all',
+            scope === 'ops' ? 'bg-white text-blue-700 shadow' : 'text-slate-500 hover:text-slate-800'
+          )}
+        >
+          Operación Día a Día
+        </button>
+        <button
+          onClick={() => setScope('sim')}
+          disabled={!session?.id}
+          title={session?.id ? undefined : 'No hay simulación activa'}
+          className={cn(
+            'px-4 py-2 rounded-lg text-xs font-black transition-all',
+            scope === 'sim' ? 'bg-white text-indigo-700 shadow' : 'text-slate-500 hover:text-slate-800',
+            !session?.id && 'opacity-40 cursor-not-allowed'
+          )}
+        >
+          Simulación activa
+        </button>
       </div>
+
+      <form onSubmit={handleSearch} className="flex gap-3 p-2 bg-white border border-slate-200 rounded-3xl shadow-xl shadow-blue-600/5 focus-within:border-blue-500 transition-all">
+        <div className="flex-1 flex items-center gap-4 px-6">
+          <Search size={22} className="text-slate-400" />
+          <input
+            type="text"
+            placeholder="ID de maleta (Ej: 000008788-B2 o MAN-20260620-0001-B1)"
+            value={searchId}
+            onChange={(e) => setSearchId(e.target.value.toUpperCase())}
+            className="w-full bg-transparent outline-none text-base font-bold text-slate-900 placeholder:text-slate-300"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={isLoading || !sessionId || !searchId.trim()}
+          className="px-8 py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-black text-sm uppercase tracking-widest transition-all active:scale-[0.98] disabled:bg-slate-300"
+        >
+          {isLoading ? 'Rastreando…' : 'Rastrear'}
+        </button>
+      </form>
+
+      {!sessionId && (
+        <p className="text-center text-xs text-slate-400">
+          {scope === 'sim' ? 'Inicia una simulación para buscar sus maletas.' : 'Conectando con la operación día a día…'}
+        </p>
+      )}
 
       <AnimatePresence mode="wait">
         {error && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="p-6 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-4 text-rose-600"
+            className="p-5 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-4 text-rose-600"
           >
             <AlertTriangle className="shrink-0" />
-            <p className="text-sm font-bold uppercase tracking-wide">{error}</p>
+            <p className="text-sm font-bold">{error}</p>
           </motion.div>
         )}
 
-        {trackingData && (
-          <motion.div 
-            key={trackingData.shipmentId}
+        {baggage && st && (
+          <motion.div
+            key={baggage.baggageId}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="space-y-6"
+            className="space-y-5"
           >
-            {/* Header Info */}
-            <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm grid grid-cols-3 gap-8">
-               <div className="space-y-1">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Baggage ID</span>
-                  <p className="text-xl font-black text-slate-900">{trackingData.shipmentId}</p>
-                  <span className="inline-block px-2 py-0.5 bg-blue-100 text-blue-700 text-[9px] font-black uppercase tracking-widest rounded-full">{trackingData.status}</span>
-               </div>
-               <div className="space-y-1">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Ubicación Actual</span>
-                  <p className="text-lg font-bold text-slate-900">{trackingData.currentHub.city}</p>
-                  <p className="text-[10px] text-slate-500">{trackingData.currentHub.name}</p>
-               </div>
-               <div className="space-y-1 text-right">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">ETA Estimado</span>
-                  <p className="text-xl font-mono font-black text-blue-600">T+{trackingData.estimatedArrival}h</p>
-                  <p className="text-[10px] text-slate-500">Calculado por Routing Engine</p>
-               </div>
+            {/* ── Estado actual ──────────────────────────────────────────────── */}
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm grid grid-cols-2 md:grid-cols-4 gap-6">
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Maleta</span>
+                <p className="text-lg font-black font-mono text-slate-900 break-all">{baggage.baggageId}</p>
+                <span className={cn('inline-block px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-full', st.cls)}>
+                  {st.label}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Ubicación actual</span>
+                <p className="text-lg font-black font-mono text-slate-900 flex items-center gap-1.5">
+                  {baggage.status === 'IN_FLIGHT' ? <Plane className="w-4 h-4 text-indigo-500" /> : <MapPin className="w-4 h-4 text-blue-500" />}
+                  {baggage.currentIcao}
+                </p>
+                {baggage.flightId && (
+                  <p className="text-[10px] font-mono text-indigo-500">✈ {baggage.flightId}</p>
+                )}
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Destino</span>
+                <p className="text-lg font-black font-mono text-slate-900">{baggage.destIcao}</p>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Deadline</span>
+                <p className="text-sm font-black font-mono text-slate-900 flex items-center gap-1.5">
+                  <Clock className="w-4 h-4 text-slate-400" />
+                  {formatUserDayTime(baggage.deadlineUtc, gmtOffset)}
+                </p>
+              </div>
             </div>
 
-            {/* Timeline */}
-            <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-10">Historial Operacional del Bulto</h3>
-                <div className="space-y-0 relative">
-                    <div className="absolute left-[23px] top-6 bottom-6 w-0.5 bg-slate-100" />
-                    
-                    {trackingData.timeline.map((step, idx) => (
-                      <div key={idx} className="relative pl-16 pb-12 last:pb-0">
-                         <div className={cn(
-                           "absolute left-0 w-12 h-12 rounded-2xl flex items-center justify-center border-4 border-white shadow-lg transition-all",
-                           step.status === 'completed' ? "bg-emerald-500 text-white" : 
-                           step.status === 'current' ? "bg-blue-600 text-white scale-110 z-10" : "bg-slate-50 text-slate-300"
-                         )}>
-                            {step.status === 'completed' ? <CheckCircle size={20} /> : <MapPin size={20} />}
-                         </div>
-
-                         <div className="grid grid-cols-4 gap-8 items-start">
-                            <div className="col-span-1">
-                               <p className={cn(
-                                 "text-sm font-black",
-                                 step.status === 'pending' ? "text-slate-400" : "text-slate-900"
-                               )}>{step.hubId}</p>
-                               <span className="text-[10px] font-bold uppercase text-slate-400 tracking-widest">{step.status}</span>
-                            </div>
-
-                            <div className="col-span-1 space-y-1">
-                               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Llegada</span>
-                               <p className="text-xs font-mono font-bold text-slate-700">{step.arrivalTime ? `T+${step.arrivalTime}h` : '—'}</p>
-                            </div>
-
-                            <div className="col-span-2 space-y-2">
-                               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Eventos en Nodo</span>
-                               <div className="space-y-1.5">
-                                  {step.events.map(evt => (
-                                    <div key={evt.id} className="flex gap-2 items-start bg-slate-50 p-2 rounded-lg border border-slate-100">
-                                       <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-1.5 shrink-0" />
-                                       <p className="text-[10px] text-slate-600 leading-tight">{evt.message}</p>
-                                    </div>
-                                  ))}
-                                  {step.events.length === 0 && <span className="text-[10px] italic text-slate-300">No hay registros</span>}
-                               </div>
-                            </div>
-                         </div>
+            {/* ── Ruta (escalas) ─────────────────────────────────────────────── */}
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-5 flex items-center gap-2">
+                <RouteIcon className="w-4 h-4" /> Ruta con escalas
+              </h3>
+              {legs.length === 0 ? (
+                <p className="text-sm text-slate-400">Sin ruta asignada todavía (el planificador aún no la enruta).</p>
+              ) : (
+                <div className="space-y-2">
+                  {legs.map((leg, i) => {
+                    const meta = LEG_META[leg.state] ?? { label: leg.state, dot: 'bg-slate-300' };
+                    return (
+                      <div key={`${leg.flightId}-${i}`} className="flex items-center gap-3 py-2 border-b border-slate-50 last:border-0">
+                        <span className={cn('w-2.5 h-2.5 rounded-full shrink-0', meta.dot, leg.state === 'DEPARTED' && 'animate-pulse')} />
+                        <span className="text-sm font-black font-mono text-slate-800 w-32 shrink-0">
+                          {leg.fromIcao} → {leg.toIcao}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-500 flex-1">
+                          {formatUserDayTime(leg.depTime, gmtOffset)} — {formatUserDayTime(leg.arrTime, gmtOffset)}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 hidden md:block">{leg.flightId}</span>
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 w-24 text-right shrink-0">
+                          {meta.label}
+                        </span>
                       </div>
-                    ))}
+                    );
+                  })}
                 </div>
+              )}
+            </div>
+
+            {/* ── Historial de cambios de estado (LE-45) ─────────────────────── */}
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-5 flex items-center gap-2">
+                <History className="w-4 h-4" /> Historial de cambios de estado
+              </h3>
+              {history === null ? (
+                <p className="text-sm text-slate-400">El historial no está disponible para esta maleta.</p>
+              ) : history.length === 0 ? (
+                <p className="text-sm text-slate-400">Sin transiciones registradas todavía.</p>
+              ) : (
+                <div className="relative space-y-0">
+                  <div className="absolute left-[9px] top-3 bottom-3 w-0.5 bg-slate-100" />
+                  {history.map((h, i) => {
+                    const meta = STATUS_META[h.status] ?? { label: h.status, cls: 'bg-slate-100 text-slate-600' };
+                    const isLast = i === history.length - 1;
+                    return (
+                      <div key={`${h.timestamp}-${i}`} className="relative pl-8 pb-4 last:pb-0">
+                        <div className={cn(
+                          'absolute left-0 top-0.5 w-5 h-5 rounded-full border-4 border-white shadow flex items-center justify-center',
+                          isLast ? 'bg-blue-600' : 'bg-emerald-500'
+                        )}>
+                          {isLast ? null : <CheckCircle className="w-3 h-3 text-white" />}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <span className="text-[11px] font-mono font-bold text-slate-500 w-32 shrink-0">
+                            {formatUserDayTime(h.timestamp, gmtOffset)}
+                          </span>
+                          <span className={cn('text-[9px] font-black uppercase px-2 py-0.5 rounded-full', meta.cls)}>
+                            {meta.label}
+                          </span>
+                          {h.icao && <span className="text-[11px] font-mono text-slate-600">{h.icao}</span>}
+                          {h.flightId && <span className="text-[11px] font-mono text-indigo-500">✈ {h.flightId}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </motion.div>
         )}

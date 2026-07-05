@@ -96,6 +96,16 @@ export interface SlaBreach {
   plannedRoute: SlaBreachLeg[];
 }
 
+// ── Disrupciones (LE-70/LE-71) ───────────────────────────────────────────────
+// El backend resuelve la fecha de la ocurrencia a cancelar a partir del scheduleId
+// sin fecha: la de hoy si faltan más de 1 h simulada para la salida, la de mañana
+// si no (regla documentada en APIS.md §15).
+export interface DisruptionResult {
+  resolvedFlightId?: string;
+  affectedFlights: number;
+  flightIds: string[];
+}
+
 // Tramo de la ruta de un envío (para dibujar en el mapa)
 export interface ShipmentRouteLeg {
   fromIcao: string;
@@ -103,6 +113,33 @@ export interface ShipmentRouteLeg {
   depTime: string;
   arrTime: string;
   state: 'ARRIVED' | 'DEPARTED' | 'PLANNED';
+}
+
+// ── Tracking de una maleta individual ────────────────────────────────────────
+export interface BaggageState {
+  baggageId: string;
+  status: 'PENDING' | 'WAITING' | 'IN_FLIGHT' | 'DELIVERED';
+  currentIcao: string;
+  flightId: string | null;   // solo cuando IN_FLIGHT
+  destIcao: string;
+  deadlineUtc: string;
+}
+
+export interface BaggageRouteLeg {
+  fromIcao: string;
+  toIcao: string;
+  depTime: string;
+  arrTime: string;
+  flightId: string;
+  state: 'ARRIVED' | 'DEPARTED' | 'PLANNED';
+}
+
+// Log de transiciones de estado de una maleta (LE-45, endpoint nuevo /history)
+export interface BaggageHistoryEntry {
+  timestamp: string;
+  status: string;
+  icao?: string;
+  flightId?: string;
 }
 
 // Maleta esperando físicamente en un aeropuerto (endpoint /airports/{icao}/transit)
@@ -156,13 +193,19 @@ export const simulationService = {
     config: { scenario: SimulationScenario; speed: number },
     signal?: AbortSignal
   ): Promise<SimulationSession> => {
+    // LE-69/LE-73: la duración es elegible (3/5/7 días) pero la corrida completa
+    // toma siempre ~90 min reales — speedFactor proporcional a los días simulados
+    // (3→48, 5→80 [valor histórico], 7→112).
+    const rangeDays = Math.max(1, Math.round(
+      (new Date(simEnd).getTime() - new Date(simStart).getTime()) / 86_400_000
+    ));
     const body = {
       dataSource:       'DB',
       solverTimingMode: 'REAL_TIME',
       optimizerMode:    'ALNS_ONLY',
       simStart,
       simEnd,
-      speedFactor:      config.scenario === SCENARIOS.COLLAPSE ? COLLAPSE_SPEED_FACTOR : SPEED_FACTOR,
+      speedFactor:      config.scenario === SCENARIOS.COLLAPSE ? COLLAPSE_SPEED_FACTOR : rangeDays * 16,
       // Todos los escenarios detectan colapso; la diferencia del escenario COLLAPSE
       // es únicamente el rango de fechas (ver computeDateRange), tan amplio que
       // permite observar el colapso real en vez de cortar la simulación antes.
@@ -220,6 +263,7 @@ export const simulationService = {
   getDashboard: async (id: string, signal?: AbortSignal): Promise<{
     simTime: string; delivered: number; pending: number; assigned: number;
     inFlight: number; slaBreaches: number; throughputPerHour: number;
+    fleetOccupancyPct?: number; airportOccupancyPct?: number;
   }> => {
     const response = await api.get(`/simulations/${id}/dashboard`, { signal });
     return response.data;
@@ -292,6 +336,40 @@ export const simulationService = {
       arrTime:  l.arrTime,
       state:    l.state,
     }));
+  },
+
+  // ── Tracking puntual de una maleta ─────────────────────────────────────────
+  getBaggage: async (id: string, baggageId: string, signal?: AbortSignal): Promise<BaggageState> => {
+    const response = await api.get(`/simulations/${id}/baggage/${encodeURIComponent(baggageId)}`, { signal });
+    return response.data;
+  },
+
+  getBaggageRoute: async (id: string, baggageId: string, signal?: AbortSignal): Promise<{
+    baggageId: string; status: string; currentIcao: string; destIcao: string;
+    deadlineUtc: string; legs: BaggageRouteLeg[];
+  }> => {
+    const response = await api.get(`/simulations/${id}/baggage/${encodeURIComponent(baggageId)}/route`, { signal });
+    return response.data;
+  },
+
+  // Historial de cambios de estado de la maleta (LE-45).
+  getBaggageHistory: async (id: string, baggageId: string, signal?: AbortSignal): Promise<BaggageHistoryEntry[]> => {
+    const response = await api.get(`/simulations/${id}/baggage/${encodeURIComponent(baggageId)}/history`, { signal });
+    return response.data ?? [];
+  },
+
+  // Cancela la próxima ocurrencia de un horario recurrente (scheduleId sin fecha).
+  injectCancellation: async (id: string, scheduleId: string, severity = 5): Promise<DisruptionResult> => {
+    const response = await api.post(`/simulations/${id}/disruptions`, { kind: 'CANCELLATION', scheduleId, severity });
+    return response.data;
+  },
+
+  // Cancelación masiva: una lista de horarios en un solo request.
+  injectCancellationsBulk: async (id: string, scheduleIds: string[], severity = 5): Promise<DisruptionResult[]> => {
+    const response = await api.post(`/simulations/${id}/disruptions/bulk`, {
+      disruptions: scheduleIds.map(scheduleId => ({ kind: 'CANCELLATION', scheduleId, severity })),
+    });
+    return response.data?.results ?? [];
   },
 
   // Maletas físicamente en un aeropuerto ahora (en espera de conexión).

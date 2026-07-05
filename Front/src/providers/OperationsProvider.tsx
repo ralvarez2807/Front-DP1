@@ -29,6 +29,9 @@ export interface OpsAirportLoad {
 export interface OpsMetrics {
   simTime: string; delivered: number; pending: number; assigned: number;
   inFlight: number; slaBreaches: number; throughputPerHour: number;
+  // Indicadores globales LE-101/LE-102 — el backend manda el % crudo, el semáforo lo pinta el front
+  fleetOccupancyPct?: number;
+  airportOccupancyPct?: number;
 }
 
 export interface OpsEvent { id: string; type: string; message: string; time: string; }
@@ -43,6 +46,8 @@ interface OperationsContextType {
   /** Para interpolar el reloj simulado entre eventos. */
   lastSimUpdate: { simMs: number; realMs: number } | null;
   activeFlightCount: number;
+  /** Total histórico de pedidos registrados en BD (LE-36); null si aún no responde. */
+  totalOrders: number | null;
 }
 
 const OperationsContext = createContext<OperationsContextType | null>(null);
@@ -74,6 +79,7 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [metrics, setMetrics]     = useState<OpsMetrics | null>(null);
   const [events, setEvents]       = useState<OpsEvent[]>([]);
   const [lastSimUpdate, setLastSimUpdate] = useState<{ simMs: number; realMs: number } | null>(null);
+  const [totalOrders, setTotalOrders] = useState<number | null>(null);
 
   // ── Refs que sobreviven a los renders ──────────────────────────────────────
   const speedFactorRef    = useRef(1);
@@ -243,6 +249,20 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return () => { cancelled = true; clearInterval(id); };
   }, [isAuthenticated, ops?.id]);
 
+  // ── Total histórico de pedidos (LE-36) ─────────────────────────────────────
+  // Se refresca por polling y al vuelo cuando llega un SHIPMENT_CREATED.
+  useEffect(() => {
+    if (!isAuthenticated) { setTotalOrders(null); return; }
+    let cancelled = false;
+    const fetch = () => operationsService.getOrdersCount()
+      .then(r => { if (!cancelled) setTotalOrders(r.total); })
+      .catch(() => {});
+    fetch();
+    const id = setInterval(fetch, 30_000);
+    const unsub = operationsSocket.on('SHIPMENT_CREATED', () => fetch());
+    return () => { cancelled = true; clearInterval(id); unsub(); };
+  }, [isAuthenticated]);
+
   // ── Conexión WebSocket: estado ──────────────────────────────────────────────
   useEffect(() => {
     const onOpen  = operationsSocket.on('__OPEN__', () => setConnected(true));
@@ -333,8 +353,8 @@ export const OperationsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const activeFlightCount = planes.length;
 
   const value = useMemo<OperationsContextType>(() => ({
-    ops, connected, planes, airports, metrics, events, lastSimUpdate, activeFlightCount,
-  }), [ops, connected, planes, airports, metrics, events, lastSimUpdate, activeFlightCount]);
+    ops, connected, planes, airports, metrics, events, lastSimUpdate, activeFlightCount, totalOrders,
+  }), [ops, connected, planes, airports, metrics, events, lastSimUpdate, activeFlightCount, totalOrders]);
 
   return (
     <OperationsContext.Provider value={value}>
