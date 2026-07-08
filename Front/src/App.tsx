@@ -41,8 +41,7 @@ function AppContent() {
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
   } = useSimulationContext();
   const {
-    metrics: opsMetrics, activeFlightCount, connected: opsConnected,
-    ops: opsStatus, lastSimUpdate: opsLastSimUpdate, totalOrders,
+    metrics: opsMetrics, activeFlightCount, connected: opsConnected, totalOrders,
   } = useOperationsContext();
   const { job: bulkJob, dismissJob: dismissBulkJob } = useBulkUploadContext();
 
@@ -57,6 +56,12 @@ function AppContent() {
   const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
   const [activeView, setActiveView] = useState<View>('dashboard');
+  // Pedido de enfocar un envío en el mapa desde otra vista (por ahora, Tracking).
+  const [focusRequest, setFocusRequest] = useState<{ scope: 'ops' | 'sim'; shipmentId: string; nonce: number } | null>(null);
+  const locateShipment = (scope: 'ops' | 'sim', shipmentId: string) => {
+    setActiveView(scope === 'sim' ? 'simulation' : 'dashboard');
+    setFocusRequest({ scope, shipmentId, nonce: Date.now() });
+  };
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -132,23 +137,6 @@ function AppContent() {
     }
     return new Date(new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000);
   }, [now, session, lastSimUpdate]);
-
-  // Momento simulado de la Operación Día a Día (C12 en el escenario de Operaciones).
-  // Con speedFactor 1 corre pegado al reloj real, pero es el reloj propio de la sesión.
-  const opsSimNowDate = useMemo(() => {
-    if (!opsLastSimUpdate) return null;
-    const sf = opsStatus?.speedFactor || 1;
-    return new Date(opsLastSimUpdate.simMs + (now.getTime() - opsLastSimUpdate.realMs) * sf);
-  }, [now, opsLastSimUpdate, opsStatus?.speedFactor]);
-
-  // Transcurridos de la Operación Día a Día desde el arranque de la sesión (C13/C15)
-  const opsSimStartMs = opsStatus?.simStart ? new Date(opsStatus.simStart).getTime() : null;
-  const opsSimElapsedMs = opsSimNowDate && opsSimStartMs != null
-    ? opsSimNowDate.getTime() - opsSimStartMs
-    : null;
-  const opsRealElapsedMs = opsLastSimUpdate && opsSimStartMs != null
-    ? now.getTime() - (opsLastSimUpdate.realMs - (opsLastSimUpdate.simMs - opsSimStartMs) / (opsStatus?.speedFactor || 1))
-    : null;
 
   // Transcurrido simulado de la sesión manual, al minuto
   const simElapsedMs = simNowDate && session?.startTimeAt
@@ -227,7 +215,7 @@ function AppContent() {
         {/* HEADER */}
         <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md shrink-0 z-40">
           <div className="h-16 flex items-center justify-between px-8">
-            {/* Relojes (C12–C16): momento real siempre; momento simulado en las vistas con sesión en vivo */}
+            {/* Relojes (C12–C16): momento real siempre; momento simulado solo en Simulación (Día a Día no lo muestra, corre en tiempo real) */}
             <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
               <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
               <div className="flex flex-col leading-tight">
@@ -243,12 +231,6 @@ function AppContent() {
                     {session?.status === 'paused' && <span className="ml-1 text-amber-500 font-sans text-[10px] font-bold">(pausado)</span>}
                   </span>
                 )}
-                {activeView === 'dashboard' && opsSimNowDate && (
-                  <span className="tabular-nums font-mono text-xs text-indigo-700 mt-0.5">
-                    <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-indigo-400">Sim</span>
-                    <span className="font-black">{formatUserDate(opsSimNowDate, gmtOffset)} · {formatUserTime(opsSimNowDate, gmtOffset)}</span>
-                  </span>
-                )}
               </div>
             </div>
 
@@ -261,13 +243,6 @@ function AppContent() {
                     {opsConnected ? 'Conectado' : 'Reconectando…'}
                   </span>
                 </div>
-                {opsSimElapsedMs != null && (
-                  <>
-                    <div className="h-7 w-px bg-slate-200 shrink-0" />
-                    <SimStat label="T. Simulado" value={formatElapsedMs(opsSimElapsedMs)}                    className="text-indigo-700" />
-                    <SimStat label="T. Real"     value={formatElapsedMs(opsRealElapsedMs ?? opsSimElapsedMs)} className="text-emerald-700" />
-                  </>
-                )}
                 {opsMetrics && (
                   <>
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
@@ -485,6 +460,7 @@ function AppContent() {
             <SimulationDashboardView
               showConfig={simConfigOpen}
               onConfigClose={() => setSimConfigOpen(false)}
+              focusRequest={focusRequest?.scope === 'sim' ? focusRequest : null}
             />
           </div>
 
@@ -498,14 +474,14 @@ function AppContent() {
             className={cn('absolute inset-0', activeView === 'dashboard' ? 'block' : 'hidden')}
             style={{ zIndex: activeView === 'dashboard' ? 1 : 0 }}
           >
-            <DailyOperationsView />
+            <DailyOperationsView focusRequest={focusRequest?.scope === 'ops' ? focusRequest : null} />
           </div>
 
           <AnimatePresence mode="wait">
             {activeView === 'orders'     && <OrderUploadView   key="orders"     />}
             {activeView === 'airports'   && <AirportManagerView key="airports"  />}
             {activeView === 'monitoring' && <MonitoringView    key="monitoring" />}
-            {activeView === 'tracking'   && <TrackingView      key="tracking"   />}
+            {activeView === 'tracking'   && <TrackingView      key="tracking" onLocateShipment={locateShipment} />}
           </AnimatePresence>
 
           {/* Tooltip hover (solo en dashboard) */}

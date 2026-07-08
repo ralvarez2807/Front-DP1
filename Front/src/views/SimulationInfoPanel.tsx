@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, Plane, Package, Search, X, ChevronRight, ChevronDown, Luggage } from 'lucide-react';
+import { Building2, Plane, Package, Search, X, ChevronRight, ChevronDown, Luggage, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import {
   simulationService, SimAirport, SimFlight, SimShipment, AirportBaggage, FlightBaggage,
-  ShipmentDiagnostics,
+  ShipmentDiagnostics, ShipmentRouteLeg,
 } from '../services/simulationService';
 import { formatUserDayTime } from '../lib/timezone';
 import { useUserTimezone } from '../hooks/useUserTimezone';
@@ -59,6 +59,7 @@ const FLIGHT_STATUS: Record<string, { label: string; cls: string }> = {
   DEPARTED:  { label: 'EN VUELO',   cls: 'bg-emerald-100 text-emerald-700' },
   SCHEDULED: { label: 'PROGRAMADO', cls: 'bg-slate-100 text-slate-500' },
   ARRIVED:   { label: 'ATERRIZADO', cls: 'bg-indigo-100 text-indigo-700' },
+  CANCELLED: { label: 'CANCELADO',  cls: 'bg-rose-100 text-rose-700' },
 };
 
 function shipmentStatus(
@@ -336,6 +337,85 @@ function DiagnosticsModal({ sessionId, shipmentId, onClose }: {
   );
 }
 
+// ── Modal de información general de un envío (origen, destino, deadline, ETA
+// planificada y ruta con tramos) — a diferencia de DiagnosticsModal, disponible
+// para cualquier envío, no solo los incumplidos/sin ruta.
+function ShipmentInfoModal({ sessionId, shipment, onClose }: {
+  sessionId: string; shipment: SimShipment; onClose: () => void;
+}) {
+  const gmtOffset = useUserTimezone();
+  const [state, setState] = useState<LoadState<ShipmentRouteLeg>>({ status: 'loading' });
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    simulationService.getShipmentRoute(sessionId, shipment.shipmentId, ctrl.signal)
+      .then(legs => setState({ status: 'ready', data: legs }))
+      .catch(() => setState({ status: 'error' }));
+    return () => ctrl.abort();
+  }, [sessionId, shipment.shipmentId]);
+
+  const legs = state.status === 'ready' ? state.data : [];
+  const plannedEta = legs.length > 0 ? legs[legs.length - 1].arrTime : null;
+  const delivered = shipment.totalBaggages > 0 && shipment.delivered >= shipment.totalBaggages;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto custom-scrollbar"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 sticky top-0 bg-white">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Información del envío</p>
+            <p className="text-base font-black font-mono text-slate-900">{shipment.shipmentId}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[12px] text-slate-600">
+            <span>Origen: <b className="font-mono text-slate-900">{shipment.originIcao}</b></span>
+            <span>Destino: <b className="font-mono text-slate-900">{shipment.destIcao}</b></span>
+            <span>Tiempo máximo (deadline): <b>{fmtDiagTime(shipment.deadlineUtc, gmtOffset)}</b></span>
+            <span>
+              Llegada planificada:{' '}
+              <b>{plannedEta ? fmtDiagTime(plannedEta, gmtOffset) : (state.status === 'loading' ? 'Calculando…' : '—')}</b>
+            </span>
+            <span>Bultos: <b>{shipment.delivered}/{shipment.totalBaggages}</b></span>
+          </div>
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Ruta con tramos</p>
+            {state.status === 'loading' && <p className="text-sm text-slate-400 py-4 text-center">Cargando ruta…</p>}
+            {state.status === 'error' && <p className="text-sm text-red-500 py-4 text-center">No se pudo cargar la ruta.</p>}
+            {state.status === 'ready' && legs.length === 0 && (
+              <p className="text-sm text-slate-400 py-4 text-center">
+                {delivered
+                  ? 'Envío ya entregado — el detalle no conserva los tramos ya recorridos.'
+                  : 'Sin ruta asignada todavía.'}
+              </p>
+            )}
+            {legs.length > 0 && (
+              <div className="space-y-1">
+                {legs.map((l, i) => (
+                  <div key={`${l.fromIcao}-${l.toIcao}-${i}`} className="flex items-center gap-3 py-2 border-b border-slate-50 last:border-0 text-[11px]">
+                    <span className={cn(
+                      'w-2 h-2 rounded-full shrink-0',
+                      l.state === 'ARRIVED' ? 'bg-emerald-500' : l.state === 'DEPARTED' ? 'bg-amber-500 animate-pulse' : 'bg-blue-400',
+                    )} />
+                    <span className="font-mono font-bold text-slate-800 w-24 shrink-0">{l.fromIcao} → {l.toIcao}</span>
+                    <span className="font-mono text-slate-500 flex-1">{fmtDiagTime(l.depTime, gmtOffset)} — {fmtDiagTime(l.arrTime, gmtOffset)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const SimulationInfoPanel: React.FC<Props> = ({
   sessionId, hasSession, airports, flights, shipments,
   selectedAirportId, selectedFlightId, selectedShipmentId, onSelectAirport, onSelectFlight, onSelectShipment,
@@ -413,6 +493,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
 
   // Envío cuyo diagnóstico forense está abierto
   const [diagShipmentId, setDiagShipmentId] = useState<string | null>(null);
+  // Envío cuya info general (origen/destino/ETA/deadline/ruta) está abierta
+  const [infoShipmentId, setInfoShipmentId] = useState<string | null>(null);
 
   // ── Aeropuertos filtrados ──────────────────────────────────────────────────
   const regions = useMemo(
@@ -708,6 +790,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   { value: 'DEPARTED',  label: 'En vuelo' },
                   { value: 'SCHEDULED', label: 'Programado' },
                   { value: 'ARRIVED',   label: 'Aterrizado' },
+                  { value: 'CANCELLED', label: 'Cancelado' },
                 ]} />
                 <FilterSelect value={flLoad} onChange={setFlLoad} options={[
                   { value: '', label: 'Carga' },
@@ -885,6 +968,15 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                                 <Search className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            {sessionId && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setInfoShipmentId(s.shipmentId); }}
+                                title="Ver información del envío (origen, destino, deadline, ruta)"
+                                className="text-slate-400 hover:text-indigo-600 shrink-0"
+                              >
+                                <Info className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                           <div className="text-right">
                             <div className="flex items-center justify-end gap-1 mb-1">
@@ -910,7 +1002,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         {tab === 'flights'  && (
           <span>
             {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'DEPARTED').length} en vuelo ·{' '}
-            {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'SCHEDULED').length} programados · {flights.length} total
+            {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'SCHEDULED').length} programados ·{' '}
+            {flights.filter(f => effectiveStatus(f, currentSimMs, activeFlightIds) === 'CANCELLED').length} cancelados · {flights.length} total
           </span>
         )}
         {tab === 'packages' && (
@@ -930,6 +1023,17 @@ export const SimulationInfoPanel: React.FC<Props> = ({
           onClose={() => setDiagShipmentId(null)}
         />
       )}
+
+      {infoShipmentId && sessionId && (() => {
+        const shipment = shipments.find(s => s.shipmentId === infoShipmentId);
+        return shipment ? (
+          <ShipmentInfoModal
+            sessionId={sessionId}
+            shipment={shipment}
+            onClose={() => setInfoShipmentId(null)}
+          />
+        ) : null;
+      })()}
     </div>
   );
 };

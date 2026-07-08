@@ -194,9 +194,11 @@ function AnimatedPlane({
 interface SimulationDashboardViewProps {
   showConfig: boolean;
   onConfigClose: () => void;
+  /** Pedido externo (p. ej. desde Tracking) de enfocar un envío por su shipmentId */
+  focusRequest?: { shipmentId: string; nonce: number } | null;
 }
 
-export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose }) => {
+export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose, focusRequest }) => {
   const { session, lastSimUpdate, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
@@ -992,6 +994,17 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       }
     } catch { /* silencioso */ }
   }, [session?.id, selectedShipmentId, activePlanes, seenFlights, simFlightList, resolveSeenFlight, selectFlight, fitToHubs]);
+
+  // Enfocar un envío pedido desde fuera (p. ej. el botón "Ver en el mapa" de
+  // Tracking). Solo necesita el shipmentId: focusOnShipment no usa otros campos
+  // del SimShipment antes de traer la ruta real por API.
+  useEffect(() => {
+    if (!focusRequest || !session?.id) return;
+    setInfoPanelOpen(true);
+    setInfoPanelTab('packages');
+    focusOnShipment({ shipmentId: focusRequest.shipmentId } as SimShipment);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.nonce, session?.id]);
 
   // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
   const selectedFlightIdRef = useRef<string | null>(null);

@@ -174,8 +174,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           .catch(() => {});
       })
       .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     const unsubs = BACKEND_EVENTS.map(eventType =>

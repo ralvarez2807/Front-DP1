@@ -287,11 +287,15 @@ export const OrderUploadView: React.FC = () => {
                   <Boxes className="w-3.5 h-3.5 text-indigo-600" /> Cantidad de maletas
                 </label>
                 <input
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={quantity}
-                  onChange={e => setQuantity(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={quantity === 0 ? '' : quantity}
+                  onChange={e => {
+                    const digits = e.target.value.replace(/\D/g, '');
+                    setQuantity(digits === '' ? 0 : Math.min(10000, parseInt(digits, 10)));
+                  }}
+                  onBlur={() => setQuantity(q => Math.max(1, q))}
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors tabular-nums"
                 />
               </div>

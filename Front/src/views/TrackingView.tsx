@@ -1,10 +1,10 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  Search, MapPin, CheckCircle, AlertTriangle, Plane, Clock, History, Route as RouteIcon,
+  Search, MapPin, CheckCircle, AlertTriangle, Plane, Clock, History, Route as RouteIcon, Map as MapIcon, Luggage,
 } from 'lucide-react';
 import {
-  simulationService, BaggageState, BaggageRouteLeg, BaggageHistoryEntry,
+  simulationService, BaggageState, BaggageRouteLeg, BaggageHistoryEntry, ShipmentBaggageSummary,
 } from '../services/simulationService';
 import { useOperationsContext } from '../providers/OperationsProvider';
 import { useSimulationContext } from '../providers/SimulationProvider';
@@ -31,7 +31,12 @@ const LEG_META: Record<string, { label: string; dot: string }> = {
   PLANNED:  { label: 'Planificado', dot: 'bg-blue-400' },
 };
 
-export const TrackingView: React.FC = () => {
+interface TrackingViewProps {
+  /** Cambia a la vista Día a día o Simulación y enfoca el envío de la maleta en el mapa. */
+  onLocateShipment?: (scope: Scope, shipmentId: string) => void;
+}
+
+export const TrackingView: React.FC<TrackingViewProps> = ({ onLocateShipment }) => {
   const gmtOffset = useUserTimezone();
   const { ops } = useOperationsContext();
   const { session } = useSimulationContext();
@@ -44,11 +49,34 @@ export const TrackingView: React.FC = () => {
   const [legs, setLegs] = useState<BaggageRouteLeg[]>([]);
   const [history, setHistory] = useState<BaggageHistoryEntry[] | null>(null);
 
+  // Sugerencias de maletas de un envío: si lo que se tipeó es (o parece) un
+  // shipmentId en vez de un baggageId completo ("...-B<n>"), se buscan sus
+  // maletas para que el usuario elija cuál rastrear — no hay endpoint de
+  // búsqueda/autocompletado genérico en el backend, así que esto es lo más
+  // parecido a "escribir un poco y ver maletas" que se puede ofrecer.
+  const [shipmentBaggages, setShipmentBaggages] = useState<ShipmentBaggageSummary[]>([]);
+  const [shipmentLookupLoading, setShipmentLookupLoading] = useState(false);
+
   const sessionId = scope === 'sim' ? session?.id ?? null : ops?.id ?? null;
 
-  const handleSearch = useCallback(async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const bid = searchId.trim();
+  useEffect(() => {
+    setShipmentBaggages([]);
+    const q = searchId.trim();
+    // Ya parece un baggageId completo (termina en "-B<dígitos>") — no es un shipmentId.
+    if (!sessionId || q.length < 3 || /-B\d+$/i.test(q)) return;
+    setShipmentLookupLoading(true);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      simulationService.getShipmentBaggages(sessionId, q, ctrl.signal)
+        .then(list => setShipmentBaggages(list))
+        .catch(() => setShipmentBaggages([]))
+        .finally(() => setShipmentLookupLoading(false));
+    }, 400);
+    return () => { clearTimeout(timer); ctrl.abort(); setShipmentLookupLoading(false); };
+  }, [searchId, sessionId]);
+
+  const runSearch = useCallback(async (bidOverride?: string) => {
+    const bid = (bidOverride ?? searchId).trim();
     if (!bid || !sessionId) return;
 
     setIsLoading(true);
@@ -64,8 +92,11 @@ export const TrackingView: React.FC = () => {
       setLegs(routeRes.status === 'fulfilled' ? routeRes.value.legs : []);
       setHistory(histRes.status === 'fulfilled' ? histRes.value : null);
     } catch (err: any) {
+      const looksLikeShipmentId = !/-B\d+$/i.test(bid);
       setError(err?.statusCode === 404
-        ? `La maleta "${bid}" no existe en ${scope === 'sim' ? 'la simulación activa' : 'la operación día a día'}.`
+        ? (looksLikeShipmentId
+          ? `"${bid}" no es una maleta — parece un ID de envío. ${shipmentBaggages.length > 0 ? 'Elige una de sus maletas abajo.' : 'Prueba con el ID completo, ej: ' + bid + '-B1.'}`
+          : `La maleta "${bid}" no existe en ${scope === 'sim' ? 'la simulación activa' : 'la operación día a día'}.`)
         : (err?.message || 'No se pudo consultar la maleta.'));
       setBaggage(null);
       setLegs([]);
@@ -73,7 +104,18 @@ export const TrackingView: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [searchId, sessionId, scope]);
+  }, [searchId, sessionId, scope, shipmentBaggages]);
+
+  const handleSearch = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    runSearch();
+  };
+
+  const pickBaggage = (bid: string) => {
+    setSearchId(bid);
+    setShipmentBaggages([]);
+    runSearch(bid);
+  };
 
   const st = baggage ? (STATUS_META[baggage.status] ?? { label: baggage.status, cls: 'bg-slate-100 text-slate-600' }) : null;
 
@@ -142,6 +184,30 @@ export const TrackingView: React.FC = () => {
         </p>
       )}
 
+      {/* Sugerencias: lo tipeado parece un ID de envío — se listan sus maletas */}
+      {shipmentLookupLoading && (
+        <p className="text-center text-xs text-slate-400">Buscando maletas del envío…</p>
+      )}
+      {!shipmentLookupLoading && shipmentBaggages.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-1.5">
+            <Luggage className="w-3.5 h-3.5" /> {shipmentBaggages.length} maleta{shipmentBaggages.length !== 1 ? 's' : ''} de este envío — elige una
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {shipmentBaggages.map(b => (
+              <button
+                key={b.baggageId}
+                onClick={() => pickBaggage(b.baggageId)}
+                className="px-3 py-1.5 bg-slate-50 hover:bg-blue-50 border border-slate-200 hover:border-blue-400 rounded-xl text-xs font-black font-mono text-slate-700 hover:text-blue-700 transition-colors"
+              >
+                {b.baggageId}
+                <span className="ml-1.5 font-sans font-semibold text-slate-400">→ {b.destIcao}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <AnimatePresence mode="wait">
         {error && (
           <motion.div
@@ -193,6 +259,19 @@ export const TrackingView: React.FC = () => {
                 </p>
               </div>
             </div>
+
+            {/* ── Ver en el mapa ─────────────────────────────────────────────── */}
+            {onLocateShipment && (
+              <button
+                onClick={() => onLocateShipment(scope, baggage.baggageId.replace(/-B\d+$/, ''))}
+                disabled={legs.length === 0}
+                title={legs.length === 0 ? 'Sin ruta asignada todavía' : undefined}
+                className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-white border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-white text-indigo-700 rounded-2xl font-black text-xs uppercase tracking-widest transition-all"
+              >
+                <MapIcon className="w-4 h-4" />
+                Ver ruta en el mapa · {scope === 'sim' ? 'Simulación' : 'Día a día'}
+              </button>
+            )}
 
             {/* ── Ruta (escalas) ─────────────────────────────────────────────── */}
             <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">

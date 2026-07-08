@@ -51,7 +51,12 @@ function toSimFlight(p: OpsPlane): SimFlight {
   };
 }
 
-export const DailyOperationsView: React.FC = React.memo(() => {
+interface DailyOperationsViewProps {
+  /** Pedido externo (p. ej. desde Tracking) de enfocar un envío por su shipmentId */
+  focusRequest?: { shipmentId: string; nonce: number } | null;
+}
+
+export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.memo(({ focusRequest }) => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
   const { planes, airports, ops, lastSimUpdate } = useOperationsContext();
 
@@ -222,7 +227,6 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   // si ese vuelo ya estaba elegido por otra vía).
   const selectPlaneFlight = useCallback((flightId: string, fromIcao: string, toIcao: string) => {
     setSelectedFlightId(flightId);
-    setInfoPanelTab('flights');
     const origin = projectedHubs.find(h => h.id === fromIcao);
     const dest   = projectedHubs.find(h => h.id === toIcao);
     if (!origin || !dest) return;
@@ -243,6 +247,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     }
     setSelectedShipmentId(null);
     setRouteOverlay(null);
+    setInfoPanelTab('flights');
     selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
   }, [selectedFlightId, selectPlaneFlight]);
 
@@ -366,7 +371,6 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         );
         if (matchedFlight) {
           setSelectedFlightId(matchedFlight.flightId);
-          setInfoPanelTab('flights');
           return;
         }
       }
@@ -376,6 +380,17 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
     } catch { /* silencioso */ }
   }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs]);
+
+  // Enfocar un envío pedido desde fuera (p. ej. el botón "Ver en el mapa" de
+  // Tracking). Solo necesita el shipmentId: focusOnShipment no usa otros campos
+  // del SimShipment antes de traer la ruta real por API.
+  useEffect(() => {
+    if (!focusRequest || !ops?.id) return;
+    setInfoPanelOpen(true);
+    setInfoPanelTab('packages');
+    focusOnShipment({ shipmentId: focusRequest.shipmentId } as SimShipment);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.nonce, ops?.id]);
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">

@@ -142,6 +142,15 @@ export interface BaggageHistoryEntry {
   flightId?: string;
 }
 
+// Maleta dentro del detalle de un envío (para el buscador de Tracking: permite
+// escribir un shipmentId y elegir cuál de sus maletas rastrear).
+export interface ShipmentBaggageSummary {
+  baggageId: string;
+  status: string;
+  destIcao: string;
+  deadlineUtc: string;
+}
+
 // Maleta esperando físicamente en un aeropuerto (endpoint /airports/{icao}/transit)
 export interface AirportBaggage {
   baggageId: string;
@@ -304,6 +313,19 @@ export const simulationService = {
       if (activeLeg) return { fromIcao: activeLeg.fromIcao, toIcao: activeLeg.toIcao };
     }
     return { fromIcao: null, toIcao: null };
+  },
+
+  // Maletas de un envío (para Tracking: si el usuario buscó un shipmentId en vez
+  // de un baggageId, esto lista sus maletas para que elija cuál rastrear).
+  getShipmentBaggages: async (id: string, shipmentId: string, signal?: AbortSignal): Promise<ShipmentBaggageSummary[]> => {
+    const response = await api.get(`/simulations/${id}/shipments/${encodeURIComponent(shipmentId)}`, { signal });
+    const baggages: any[] = response.data?.baggages ?? [];
+    return baggages.map(b => ({
+      baggageId: b.baggageId,
+      status: b.status,
+      destIcao: b.destIcao,
+      deadlineUtc: b.deadlineUtc,
+    }));
   },
 
   // Foto forense de cada incumplimiento de SLA en el instante en que ocurrió.
