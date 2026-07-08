@@ -331,13 +331,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           // de APIS.md). "collapsed" queda fuera: COLLAPSE_DETECTED ya pidió el
           // reporte apenas se detectó, este polling solo es la red de seguridad.
           if (updated.status === 'completed' || updated.status === 'stopped') {
+            const outcome: 'completed' | 'stopped' = updated.status;
             const scenario = config?.scenario ?? 'period_5d';
             simulationService.getSummaryReport(sessionId)
               .then(report => {
-                setCompletionReport({ ...report, __outcome: updated.status, __sessionId: sessionId });
-                saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: updated.status, report });
+                setCompletionReport({ ...report, __outcome: outcome, __sessionId: sessionId });
+                saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
               })
-              .catch(() => setCompletionReport({ error: true, __outcome: updated.status, __sessionId: sessionId }));
+              .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
           }
           socketService.disconnect();
           localStorage.removeItem('simulation_config');
