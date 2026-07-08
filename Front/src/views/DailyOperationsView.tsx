@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid, XCircle, FileText,
+  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid, XCircle, FileText, Package,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
@@ -9,6 +9,7 @@ import { AnimatedPlane } from '../components/map/AnimatedPlane';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { FlightCancelModal } from '../components/FlightCancelModal';
 import { SummaryReportModal } from '../components/SummaryReportModal';
+import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { simulationService } from '../services/simulationService';
 import { operationsSocket } from '../services/operationsService';
@@ -51,12 +52,7 @@ function toSimFlight(p: OpsPlane): SimFlight {
   };
 }
 
-interface DailyOperationsViewProps {
-  /** Pedido externo (p. ej. desde Tracking) de enfocar un envío por su shipmentId */
-  focusRequest?: { shipmentId: string; nonce: number } | null;
-}
-
-export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.memo(({ focusRequest }) => {
+export const DailyOperationsView: React.FC = React.memo(() => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
   const { planes, airports, ops, lastSimUpdate } = useOperationsContext();
 
@@ -122,6 +118,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
   // Reporte de la última planificación estable de la operación (G09)
   const [reportOpen, setReportOpen] = useState(false);
+  // Última solución exitosa: rutas asignadas (GET /simulations/:id/result)
+  const [lastSolutionOpen, setLastSolutionOpen] = useState(false);
 
   useEffect(() => {
     const CANCEL_BLINK_MS = 60_000;
@@ -380,17 +378,6 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
       fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
     } catch { /* silencioso */ }
   }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs]);
-
-  // Enfocar un envío pedido desde fuera (p. ej. el botón "Ver en el mapa" de
-  // Tracking). Solo necesita el shipmentId: focusOnShipment no usa otros campos
-  // del SimShipment antes de traer la ruta real por API.
-  useEffect(() => {
-    if (!focusRequest || !ops?.id) return;
-    setInfoPanelOpen(true);
-    setInfoPanelTab('packages');
-    focusOnShipment({ shipmentId: focusRequest.shipmentId } as SimShipment);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusRequest?.nonce, ops?.id]);
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -937,6 +924,15 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
             <FileText className="w-4 h-4" /> Reporte
           </button>
         )}
+        {ops?.id && (
+          <button
+            onClick={() => setLastSolutionOpen(true)}
+            className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-slate-700 border border-slate-200 hover:bg-slate-50"
+            title="Última solución exitosa: rutas asignadas a cada maleta"
+          >
+            <Package className="w-4 h-4" /> Última solución
+          </button>
+        )}
       </div>
 
       {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos ─────────────── */}
@@ -1017,6 +1013,11 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
           sessionId={ops.id}
           onClose={() => setReportOpen(false)}
         />
+      )}
+
+      {/* ── MODAL: Última solución exitosa (rutas asignadas) ─────────────────── */}
+      {lastSolutionOpen && ops?.id && (
+        <LastSolutionModal sessionId={ops.id} onClose={() => setLastSolutionOpen(false)} />
       )}
 
       <style>{`

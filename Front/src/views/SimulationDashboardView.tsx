@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Play, Pause, RotateCcw, Settings2, Database,
-  Map as MapIcon, Clock, AlertTriangle, CheckCircle,
+  Map as MapIcon, Clock, AlertTriangle, CheckCircle, Package,
   ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, XCircle,
 } from 'lucide-react';
 import { Plane } from 'lucide-react';
@@ -16,6 +16,7 @@ import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { FlightCancelModal } from '../components/FlightCancelModal';
 import { RunComparisonModal } from '../components/RunComparisonModal';
 import { ReportRows } from '../components/SummaryReportModal';
+import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
@@ -194,11 +195,9 @@ function AnimatedPlane({
 interface SimulationDashboardViewProps {
   showConfig: boolean;
   onConfigClose: () => void;
-  /** Pedido externo (p. ej. desde Tracking) de enfocar un envío por su shipmentId */
-  focusRequest?: { shipmentId: string; nonce: number } | null;
 }
 
-export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose, focusRequest }) => {
+export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose }) => {
   const { session, lastSimUpdate, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
@@ -212,6 +211,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   // Popover de leyenda flotante en el mapa
   const [legendOpen, setLegendOpen] = useState(false);
+  // Última solución exitosa: rutas asignadas (GET /simulations/:id/result)
+  const [lastSolutionOpen, setLastSolutionOpen] = useState(false);
   const simHubLoads = useMemo(() => {
     const m = new Map<string, { load: number; capacity: number }>();
     simAirportList.forEach(a => m.set(a.icao, { load: a.load, capacity: a.capacity }));
@@ -994,17 +995,6 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       }
     } catch { /* silencioso */ }
   }, [session?.id, selectedShipmentId, activePlanes, seenFlights, simFlightList, resolveSeenFlight, selectFlight, fitToHubs]);
-
-  // Enfocar un envío pedido desde fuera (p. ej. el botón "Ver en el mapa" de
-  // Tracking). Solo necesita el shipmentId: focusOnShipment no usa otros campos
-  // del SimShipment antes de traer la ruta real por API.
-  useEffect(() => {
-    if (!focusRequest || !session?.id) return;
-    setInfoPanelOpen(true);
-    setInfoPanelTab('packages');
-    focusOnShipment({ shipmentId: focusRequest.shipmentId } as SimShipment);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusRequest?.nonce, session?.id]);
 
   // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
   const selectedFlightIdRef = useRef<string | null>(null);
@@ -1963,7 +1953,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   <CheckCircle className="w-7 h-7 text-white" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-black text-white">Simulación Completada</h3>
+                  <h3 className="text-lg font-black text-white">
+                    {completionReport.__outcome === 'stopped' ? 'Simulación Detenida' : 'Simulación Completada'}
+                  </h3>
                   <p className="text-emerald-200 text-xs font-semibold">Reporte de la última planificación estable</p>
                 </div>
               </div>
@@ -1972,6 +1964,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   <p className="text-sm text-slate-500 text-center py-4">No se pudo obtener el reporte.</p>
                 ) : (
                   <ReportRows report={completionReport} gmtOffset={gmtOffset} />
+                )}
+                {completionReport.__sessionId && (
+                  <button
+                    onClick={() => setLastSolutionOpen(true)}
+                    className="w-full py-2.5 rounded-xl border border-emerald-200 text-emerald-700 hover:bg-emerald-50 font-bold text-xs uppercase tracking-widest transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Package className="w-3.5 h-3.5" /> Ver última solución exitosa
+                  </button>
                 )}
                 <button
                   onClick={clearCompletionReport}
@@ -1984,6 +1984,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           </motion.div>
         )}
       </AnimatePresence>
+
+      {lastSolutionOpen && completionReport?.__sessionId && (
+        <LastSolutionModal sessionId={completionReport.__sessionId} onClose={() => setLastSolutionOpen(false)} />
+      )}
 
       {/* ── MODAL: Advertencia Colapso ───────────────────────────────────────── */}
       <AnimatePresence>

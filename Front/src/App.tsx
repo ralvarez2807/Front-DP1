@@ -56,12 +56,6 @@ function AppContent() {
   const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
   const [activeView, setActiveView] = useState<View>('dashboard');
-  // Pedido de enfocar un envío en el mapa desde otra vista (por ahora, Tracking).
-  const [focusRequest, setFocusRequest] = useState<{ scope: 'ops' | 'sim'; shipmentId: string; nonce: number } | null>(null);
-  const locateShipment = (scope: 'ops' | 'sim', shipmentId: string) => {
-    setActiveView(scope === 'sim' ? 'simulation' : 'dashboard');
-    setFocusRequest({ scope, shipmentId, nonce: Date.now() });
-  };
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -460,7 +454,6 @@ function AppContent() {
             <SimulationDashboardView
               showConfig={simConfigOpen}
               onConfigClose={() => setSimConfigOpen(false)}
-              focusRequest={focusRequest?.scope === 'sim' ? focusRequest : null}
             />
           </div>
 
@@ -474,14 +467,14 @@ function AppContent() {
             className={cn('absolute inset-0', activeView === 'dashboard' ? 'block' : 'hidden')}
             style={{ zIndex: activeView === 'dashboard' ? 1 : 0 }}
           >
-            <DailyOperationsView focusRequest={focusRequest?.scope === 'ops' ? focusRequest : null} />
+            <DailyOperationsView />
           </div>
 
           <AnimatePresence mode="wait">
             {activeView === 'orders'     && <OrderUploadView   key="orders"     />}
             {activeView === 'airports'   && <AirportManagerView key="airports"  />}
             {activeView === 'monitoring' && <MonitoringView    key="monitoring" />}
-            {activeView === 'tracking'   && <TrackingView      key="tracking" onLocateShipment={locateShipment} />}
+            {activeView === 'tracking'   && <TrackingView      key="tracking"   />}
           </AnimatePresence>
 
           {/* Tooltip hover (solo en dashboard) */}
@@ -535,7 +528,9 @@ function AppContent() {
             <div className="bg-emerald-600 px-4 py-3 flex items-center gap-3">
               <CheckCircle className="w-5 h-5 text-white shrink-0" />
               <div className="flex-1">
-                <p className="text-white font-black text-sm">Simulación completada</p>
+                <p className="text-white font-black text-sm">
+                  {completionReport.__outcome === 'stopped' ? 'Simulación detenida' : 'Simulación completada'}
+                </p>
                 <p className="text-emerald-200 text-[10px]">Los resultados están disponibles</p>
               </div>
               <button

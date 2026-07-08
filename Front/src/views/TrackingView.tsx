@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  Search, MapPin, CheckCircle, AlertTriangle, Plane, Clock, History, Route as RouteIcon, Map as MapIcon, Luggage,
+  Search, MapPin, CheckCircle, AlertTriangle, Plane, Clock, History, Route as RouteIcon, Luggage,
 } from 'lucide-react';
 import {
   simulationService, BaggageState, BaggageRouteLeg, BaggageHistoryEntry, ShipmentBaggageSummary,
@@ -31,12 +31,7 @@ const LEG_META: Record<string, { label: string; dot: string }> = {
   PLANNED:  { label: 'Planificado', dot: 'bg-blue-400' },
 };
 
-interface TrackingViewProps {
-  /** Cambia a la vista Día a día o Simulación y enfoca el envío de la maleta en el mapa. */
-  onLocateShipment?: (scope: Scope, shipmentId: string) => void;
-}
-
-export const TrackingView: React.FC<TrackingViewProps> = ({ onLocateShipment }) => {
+export const TrackingView: React.FC = () => {
   const gmtOffset = useUserTimezone();
   const { ops } = useOperationsContext();
   const { session } = useSimulationContext();
@@ -259,19 +254,6 @@ export const TrackingView: React.FC<TrackingViewProps> = ({ onLocateShipment }) 
                 </p>
               </div>
             </div>
-
-            {/* ── Ver en el mapa ─────────────────────────────────────────────── */}
-            {onLocateShipment && (
-              <button
-                onClick={() => onLocateShipment(scope, baggage.baggageId.replace(/-B\d+$/, ''))}
-                disabled={legs.length === 0}
-                title={legs.length === 0 ? 'Sin ruta asignada todavía' : undefined}
-                className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-white border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-white text-indigo-700 rounded-2xl font-black text-xs uppercase tracking-widest transition-all"
-              >
-                <MapIcon className="w-4 h-4" />
-                Ver ruta en el mapa · {scope === 'sim' ? 'Simulación' : 'Día a día'}
-              </button>
-            )}
 
             {/* ── Ruta (escalas) ─────────────────────────────────────────────── */}
             <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">

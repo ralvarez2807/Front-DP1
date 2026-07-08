@@ -134,6 +134,29 @@ export interface BaggageRouteLeg {
   state: 'ARRIVED' | 'DEPARTED' | 'PLANNED';
 }
 
+// ── Última solución exitosa (GET /simulations/:id/result) ───────────────────
+// A diferencia de /reports/summary (solo métricas agregadas), esto trae la
+// última planificación estable con las rutas asignadas a cada maleta.
+// Responde SIEMPRE (antes daba 404 mientras corría) — status "RUNNING" mientras
+// la sesión sigue activa, terminal (COMPLETED/COLLAPSED/STOPPED) al cerrar.
+// TTL 5 min desde el último snapshot; pasado eso, o si el id nunca existió, 404.
+export interface AssignedRouteBaggage {
+  baggageId: string;
+  status: 'PENDING' | 'WAITING' | 'IN_FLIGHT' | 'DELIVERED';
+  currentIcao: string;
+  destIcao: string;
+  deadlineUtc: string;
+  legs: BaggageRouteLeg[];
+}
+export interface SimulationResult {
+  id: string;
+  username: string;
+  status: 'RUNNING' | 'COMPLETED' | 'COLLAPSED' | 'STOPPED';
+  endedAt: string | null;
+  collapseReason: string | null;
+  assignedRoutes: AssignedRouteBaggage[];
+}
+
 // Log de transiciones de estado de una maleta (LE-45, endpoint nuevo /history)
 export interface BaggageHistoryEntry {
   timestamp: string;
@@ -283,6 +306,12 @@ export const simulationService = {
     return response.data;
   },
 
+  // Última solución exitosa (rutas asignadas) — ver SimulationResult arriba.
+  getResult: async (id: string, signal?: AbortSignal): Promise<SimulationResult> => {
+    const response = await api.get(`/simulations/${id}/result`, { signal });
+    return response.data;
+  },
+
   getSimAirports: async (id: string, signal?: AbortSignal): Promise<SimAirport[]> => {
     const response = await api.get(`/simulations/${id}/airports`, { signal });
     return response.data;
@@ -375,9 +404,10 @@ export const simulationService = {
   },
 
   // Historial de cambios de estado de la maleta (LE-45).
+  // Respuesta: { baggageId, entries: [...] } — no un array plano.
   getBaggageHistory: async (id: string, baggageId: string, signal?: AbortSignal): Promise<BaggageHistoryEntry[]> => {
     const response = await api.get(`/simulations/${id}/baggage/${encodeURIComponent(baggageId)}/history`, { signal });
-    return response.data ?? [];
+    return response.data?.entries ?? [];
   },
 
   // Cancela la próxima ocurrencia de un horario recurrente (scheduleId sin fecha).

@@ -1,7 +1,8 @@
-import React from 'react';
-import { AlertOctagon, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { AlertOctagon, X, Package } from 'lucide-react';
 import { CollapseResult } from '../providers/SimulationProvider';
 import { ReportRows } from './SummaryReportModal';
+import { LastSolutionModal } from './LastSolutionModal';
 import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const REASON_LABELS: Record<string, string> = {
@@ -26,6 +27,7 @@ function fmtDuration(ms: number, unitsLabel: [string, string]): string {
  */
 export function CollapseSummaryModal({ result, onClose }: { result: CollapseResult; onClose: () => void }) {
   const gmtOffset = useUserTimezone();
+  const [lastSolutionOpen, setLastSolutionOpen] = useState(false);
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm p-6" onClick={onClose}>
       <div
@@ -73,6 +75,13 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
           )}
 
           <button
+            onClick={() => setLastSolutionOpen(true)}
+            className="w-full py-2.5 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 font-bold text-xs uppercase tracking-widest transition-colors flex items-center justify-center gap-1.5"
+          >
+            <Package className="w-3.5 h-3.5" /> Ver última solución exitosa
+          </button>
+
+          <button
             onClick={onClose}
             className="w-full py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm transition-colors shadow-lg shadow-rose-600/20"
           >
@@ -80,6 +89,10 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
           </button>
         </div>
       </div>
+
+      {lastSolutionOpen && (
+        <LastSolutionModal sessionId={result.sessionId} onClose={() => setLastSolutionOpen(false)} />
+      )}
     </div>
   );
 }

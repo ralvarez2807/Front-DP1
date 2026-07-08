@@ -71,6 +71,7 @@ export interface DashboardMetrics {
 }
 
 export interface CollapseResult {
+  sessionId: string;
   simTime: string;
   reason: string;
   baggageId: string;
@@ -206,17 +207,21 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       if (status === 'stopped' || status === 'completed' || status === 'collapsed') {
         // Capturar el ID antes de limpiar la sesión
         setSession(prev => {
-          if (prev?.id && status === 'completed') {
+          // "completed" (fin de tiempo) y "stopped" (corte manual, propio o desde
+          // otra pestaña/dispositivo) muestran el mismo reporte de cierre — solo
+          // "collapsed" queda fuera porque COLLAPSE_DETECTED ya lo maneja aparte
+          // y llega antes que este SIM_STATUS de respaldo.
+          if (prev?.id && (status === 'completed' || status === 'stopped')) {
             const runId = prev.id;
             const scenario = prev.config?.scenario ?? 'period_5d';
             // Fetch asíncrono del reporte — no bloquea el render. Además se guarda
             // en el historial local para la comparativa de ejecuciones (LE-76).
             simulationService.getSummaryReport(runId)
               .then(report => {
-                setCompletionReport(report);
-                saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'completed', report });
+                setCompletionReport({ ...report, __outcome: status, __sessionId: runId });
+                saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: status, report });
               })
-              .catch(() => setCompletionReport({ error: true }));
+              .catch(() => setCompletionReport({ error: true, __outcome: status, __sessionId: runId }));
           }
           return null;
         });
@@ -254,6 +259,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       const simElapsedMs  = new Date(payload.simTime).getTime() - new Date(startTimeAt).getTime();
       const realElapsedMs = Date.now() - (sessionStartedAt ?? Date.now());
       setCollapseResult({
+        sessionId,
         simTime:           payload.simTime,
         reason:            payload.reason,
         baggageId:         payload.baggageId,
@@ -319,6 +325,20 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         const updated = await simulationService.getSession(sessionId, config);
 
         if (TERMINAL.has(updated.status)) {
+          // Este polling de respaldo es el que de verdad detecta el fin de una
+          // simulación (el evento SIM_STATUS por WS que se maneja más abajo no
+          // está confirmado en el backend — no aparece en la tabla de eventos
+          // de APIS.md). "collapsed" queda fuera: COLLAPSE_DETECTED ya pidió el
+          // reporte apenas se detectó, este polling solo es la red de seguridad.
+          if (updated.status === 'completed' || updated.status === 'stopped') {
+            const scenario = config?.scenario ?? 'period_5d';
+            simulationService.getSummaryReport(sessionId)
+              .then(report => {
+                setCompletionReport({ ...report, __outcome: updated.status, __sessionId: sessionId });
+                saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: updated.status, report });
+              })
+              .catch(() => setCompletionReport({ error: true, __outcome: updated.status, __sessionId: sessionId }));
+          }
           socketService.disconnect();
           localStorage.removeItem('simulation_config');
           setSession(null);
@@ -424,18 +444,36 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   const resetSimulation = useCallback(async () => {
     if (!session) return;
+    const runId = session.id;
+    const scenario = session.config?.scenario ?? 'period_5d';
+
+    // El reporte se pide ANTES de detener: una vez que el backend libera la
+    // sesión, /reports/summary deja de responder (mismo motivo por el que
+    // COLLAPSE_DETECTED lo pide apenas detecta el colapso, no después).
+    const report = await simulationService.getSummaryReport(runId).catch(() => null);
+
     try {
-      await simulationService.stop(session.id);
-      socketService.disconnect();
-      localStorage.removeItem('simulation_config');
-      setSession(null);
-      setEvents([]);
-      setSessionStartedAt(null);
-      setLastSimUpdate(null);
-      addToast('Simulación detenida', 'info');
+      await simulationService.stop(runId);
     } catch {
-      addToast('Error al detener', 'error');
+      // Seguimos igual: si stop() falla probablemente la sesión ya había
+      // terminado sola justo antes de este click — no debe impedir mostrar
+      // el reporte que sí logramos traer.
     }
+
+    socketService.disconnect();
+    localStorage.removeItem('simulation_config');
+    setSession(null);
+    setEvents([]);
+    setSessionStartedAt(null);
+    setLastSimUpdate(null);
+    if (report) {
+      setCompletionReport({ ...report, __outcome: 'stopped', __sessionId: runId });
+      saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report });
+    } else {
+      setCompletionReport({ error: true, __outcome: 'stopped', __sessionId: runId });
+      saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report: null });
+    }
+    addToast('Simulación detenida', 'info');
   }, [session, addToast]);
 
   const injectFault = useCallback(async (_type: string, _locationId: string) => {
