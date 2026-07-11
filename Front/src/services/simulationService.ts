@@ -182,6 +182,28 @@ export interface AirportBaggage {
   deadlineUtc: string;
   nextFlightId: string | null;
   nextDepTime: string | null;
+  arrivedAt: string | null;      // llegó al almacén
+  readyAt: string | null;        // fin de la ventana de conexión (procesamiento)
+  awaitingPickup: boolean;       // llegó a su destino final y espera recojo del pasajero
+  pickupAt: string | null;       // instante en que será recogida (y descontada del almacén)
+}
+
+// Maleta individual que va a llegar a un aeropuerto en un vuelo entrante.
+export interface InboundBaggage {
+  baggageId: string;
+  shipmentId: string;
+  destIcao: string;
+}
+
+// Grupo de maletas (envío) que llega planificadamente a un aeropuerto en un vuelo
+// entrante (endpoint /airports/{icao}/inbound).
+export interface InboundFlightGroup {
+  flightId: string;
+  fromIcao: string;
+  arrTime: string;
+  baggageCount: number;
+  shipmentIds: string[];
+  baggages: InboundBaggage[];
 }
 
 // Maleta a bordo / asignada a un vuelo (aplanada desde /flights/{flightId})
@@ -428,6 +450,14 @@ export const simulationService = {
   getAirportBaggages: async (id: string, icao: string, signal?: AbortSignal): Promise<AirportBaggage[]> => {
     const response = await api.get(`/simulations/${id}/airports/${icao}/transit`, { signal });
     return response.data?.transit ?? [];
+  },
+
+  // Vuelos entrantes planificados a un aeropuerto: cada uno trae un grupo de
+  // maletas (envíos) que llegarán al almacén. Usado para mostrar en el panel del
+  // aeropuerto la carga planificada que entra.
+  getAirportInbound: async (id: string, icao: string, signal?: AbortSignal): Promise<InboundFlightGroup[]> => {
+    const response = await api.get(`/simulations/${id}/airports/${icao}/inbound`, { signal });
+    return response.data?.inbound ?? [];
   },
 
   // Maletas a bordo / asignadas a un vuelo (aplanadas desde sus envíos).

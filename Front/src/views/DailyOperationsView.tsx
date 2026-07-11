@@ -388,7 +388,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         className="w-full h-full"
         style={{ cursor: isPanning.current ? 'grabbing' : 'grab' }}
         viewBox={`0 0 ${MAP_VIEWBOX.width} ${MAP_VIEWBOX.height}`}
-        preserveAspectRatio="xMidYMid meet"
+        preserveAspectRatio="none"
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -456,6 +456,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                     stroke="#ef4444"
                     strokeWidth={0.8 / viewTransform.k}
                     fill="none"
+                    strokeLinecap="round"
+                    strokeDasharray={`${3 / viewTransform.k} ${3 / viewTransform.k}`}
                     opacity={dimmed ? 0.10 : 0.45}
                   />
                 );
@@ -539,7 +541,9 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                     fill="none"
                     opacity={0.95}
                     strokeLinecap="round"
-                    strokeDasharray={planned ? `${5 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                    strokeDasharray={planned
+                      ? `${5 / viewTransform.k} ${4 / viewTransform.k}`
+                      : `${2.5 / viewTransform.k} ${2.5 / viewTransform.k}`}
                   />
                 );
               })}
@@ -675,21 +679,28 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                       strokeWidth={1.2 / viewTransform.k}
                       strokeDasharray={`${3.5 / viewTransform.k} ${2.5 / viewTransform.k}`} />
                   )}
-                  {/* Diamante — marcador de aeropuerto */}
-                  <rect
-                    x={x - r * 0.82} y={y - r * 0.82}
-                    width={r * 1.64} height={r * 1.64}
-                    rx={r * 0.28}
-                    fill={fill}
-                    stroke="white"
-                    strokeWidth={1.4 / viewTransform.k}
-                    transform={`rotate(45,${x},${y})`}
-                  />
-                  {/* Cruz de pistas */}
-                  <line x1={x - r * 0.42} y1={y} x2={x + r * 0.42} y2={y}
-                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
-                  <line x1={x} y1={y - r * 0.42} x2={x} y2={y + r * 0.42}
-                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
+                  {/* Marcador de ALMACÉN (aeropuerto): silueta de nave con techo a
+                      dos aguas y portón — mismo color/borde que antes, solo cambia la forma. */}
+                  {(() => {
+                    const w    = r * 1.0;
+                    const hh   = r * 0.9;
+                    const eave = y - hh * 0.15;
+                    const base = y + hh;
+                    const sw   = viewTransform.k;
+                    const silhouette =
+                      `M ${x - w} ${base} L ${x - w} ${eave} L ${x} ${y - hh} L ${x + w} ${eave} L ${x + w} ${base} Z`;
+                    const doorW = w * 0.5, doorH = hh * 0.8;
+                    return (
+                      <>
+                        <path d={silhouette} fill={fill} stroke="white"
+                          strokeWidth={1.4 / sw} strokeLinejoin="round" />
+                        <line x1={x - w} y1={eave} x2={x + w} y2={eave}
+                          stroke="white" strokeWidth={0.8 / sw} strokeLinecap="round" />
+                        <rect x={x - doorW / 2} y={base - doorH} width={doorW} height={doorH}
+                          rx={r * 0.12} fill="white" opacity={0.92} />
+                      </>
+                    );
+                  })()}
                   {/* Etiqueta */}
                   <rect
                     x={x - 28 / viewTransform.k} y={y - 20 / viewTransform.k}
