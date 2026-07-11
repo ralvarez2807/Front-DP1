@@ -8,7 +8,6 @@ import { useAuthContext } from './AuthProvider';
 
 interface MapContextType {
   worldData: any;
-  projection: d3.GeoProjection;
   pathGenerator: d3.GeoPath;
   projectedHubs: Hub[];
   projectedFlights: Flight[];
@@ -21,15 +20,81 @@ const MapContext = createContext<MapContextType | null>(null);
 const MAP_WIDTH  = 1200;
 const MAP_HEIGHT = 800;
 
+// Proyección resultante: una función puntual `project([lng,lat]) → [x,y]` (para
+// ubicar hubs/aviones) y una proyección `pathProjection` compatible con d3.geoPath
+// (para dibujar países). Ambas comparten el mismo mapeo, así todo queda alineado.
+interface MapProjection {
+  project: (coords: [number, number]) => [number, number] | null;
+  pathProjection: any;
+}
+
 /**
- * Proyección Mercator mundial estándar.
- * El auto-fit de zoom/pan (en SimulationDashboardView) se encarga de centrar
- * la vista sobre los aeropuertos operativos sin recortar el océano.
+ * Proyección Mercator que ESTIRA el grupo de aeropuertos para que ocupe TODA la
+ * pantalla (pedido del profesor: Copenhague pegado arriba, Montevideo abajo, etc.).
+ *
+ * Se parte de un Mercator encuadrado (`fitExtent`, uniforme) y luego se escala de
+ * forma NO uniforme en X e Y para que el bounding box de los hubs llene exactamente
+ * el viewBox (menos un pequeño margen para las etiquetas). El estiramiento se hornea
+ * en las coordenadas proyectadas, de modo que países, hubs, rutas y aviones quedan
+ * consistentes y el zoom/pan (escala uniforme) sigue funcionando igual encima.
+ * Sin hubs aún (login inicial) usa el mundo estándar como fallback.
  */
-function buildProjection(_hubs: Hub[]) {
-  return d3.geoMercator()
-    .scale(185)
-    .translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
+function buildProjection(hubs: Hub[]): MapProjection {
+  if (hubs.length === 0) {
+    const merc = d3.geoMercator()
+      .scale(185)
+      .translate([MAP_WIDTH / 2, MAP_HEIGHT / 1.55]);
+    return { project: (c) => merc(c) ?? null, pathProjection: merc };
+  }
+
+  // Margen para que los marcadores y sus etiquetas no se corten en los bordes.
+  const pad = 46;
+  const points = {
+    type: 'MultiPoint' as const,
+    coordinates: hubs.map(h => [h.lng, h.lat]),
+  };
+  const merc = d3.geoMercator().fitExtent(
+    [[pad, pad], [MAP_WIDTH - pad, MAP_HEIGHT - pad]],
+    points as any,
+  );
+
+  // Bounding box de los hubs ya proyectados (uniforme).
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const h of hubs) {
+    const p = merc([h.lng, h.lat]);
+    if (!p) continue;
+    minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+    minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+  }
+  const spanX = Math.max(1, maxX - minX);
+  const spanY = Math.max(1, maxY - minY);
+  // Escalas independientes para llenar el viewBox (menos el margen) en ambos ejes.
+  const sx = (MAP_WIDTH  - 2 * pad) / spanX;
+  const sy = (MAP_HEIGHT - 2 * pad) / spanY;
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const tx = MAP_WIDTH / 2,     ty = MAP_HEIGHT / 2;
+
+  const stretch = (p: [number, number]): [number, number] =>
+    [tx + (p[0] - cx) * sx, ty + (p[1] - cy) * sy];
+
+  const project = (c: [number, number]): [number, number] | null => {
+    const p = merc(c);
+    return p ? stretch(p as [number, number]) : null;
+  };
+
+  // Para dibujar países se COMPONEN dos streams: primero Mercator (con su recorte
+  // del antimeridiano intacto), y después un post-transform que estira las
+  // coordenadas planas ya proyectadas. Así se evitan artefactos y se mantiene el
+  // mismo mapeo que `project`.
+  const post = d3.geoTransform({
+    point(x: number, y: number) {
+      const s = stretch([x, y]);
+      (this as any).stream.point(s[0], s[1]);
+    },
+  });
+  const pathProjection = { stream: (sink: any) => merc.stream(post.stream(sink)) };
+
+  return { project, pathProjection };
 }
 
 // Bezier cuadrático — control point simétrico para que A→B y B→A
@@ -56,8 +121,8 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ── Proyección encuadrada en la región operativa ─────────────────────────
   // Depende de los aeropuertos: al cargarlos, el mapa se re-encuadra en su
   // bounding box (ignora continentes sin vuelos).
-  const projection = useMemo(() => buildProjection(fetchedHubs), [fetchedHubs]);
-  const pathGenerator = useMemo(() => d3.geoPath().projection(projection), [projection]);
+  const mapProjection = useMemo(() => buildProjection(fetchedHubs), [fetchedHubs]);
+  const pathGenerator = useMemo(() => d3.geoPath(mapProjection.pathProjection), [mapProjection]);
 
   // ── Cargar mapa mundial ──────────────────────────────────────────────────
   useEffect(() => {
@@ -117,7 +182,7 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const hubs = fetchedHubs.length > 0 ? fetchedHubs : [];
 
     const pHubs: Hub[] = hubs.map(hub => {
-      const [px, py] = projection([hub.lng, hub.lat]) ?? [0, 0];
+      const [px, py] = mapProjection.project([hub.lng, hub.lat]) ?? [0, 0];
       return { ...hub, projectedX: px, projectedY: py };
     });
 
@@ -134,12 +199,11 @@ export const MapProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return { projectedHubs: pHubs, projectedFlights: pFlights };
-  }, [projection, fetchedHubs, fetchedFlights]);
+  }, [mapProjection, fetchedHubs, fetchedFlights]);
 
   return (
     <MapContext.Provider value={{
       worldData,
-      projection,
       pathGenerator,
       projectedHubs,
       projectedFlights,

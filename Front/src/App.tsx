@@ -3,7 +3,7 @@ import {
   Activity, Globe, Settings2, LayoutDashboard,
   LogOut, Calendar, Search, ChevronRight, ChevronDown, ChevronUp,
   Package, Plane, AlertTriangle, CheckCircle, TrendingUp, PackagePlus, Warehouse,
-  Play, Pause, RotateCcw,
+  Play, Pause, RotateCcw, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -56,6 +56,8 @@ function AppContent() {
   const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
   const [activeView, setActiveView] = useState<View>('dashboard');
+  // Sidebar colapsable — permite ocultar la navegación para ver el mapa más grande.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -160,15 +162,25 @@ function AppContent() {
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex overflow-hidden">
 
       {/* ── SIDEBAR ──────────────────────────────────────────────────────── */}
-      <aside className="w-64 border-r border-slate-200 bg-white flex flex-col shrink-0 z-50">
+      <aside className={cn(
+        'border-r border-slate-200 bg-white flex flex-col shrink-0 z-50 overflow-hidden transition-[width] duration-200',
+        sidebarCollapsed ? 'w-0 border-r-0' : 'w-64'
+      )}>
         <div className="p-6 flex items-center gap-3">
-          <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-600/20">
+          <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-600/20 shrink-0">
             <Globe className="text-white w-6 h-6" />
           </div>
-          <div>
+          <div className="min-w-0 flex-1">
             <h1 className="text-lg font-bold tracking-tight text-slate-900">Tasf.B2B</h1>
             <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Enterprise Operational</p>
           </div>
+          <button
+            onClick={() => setSidebarCollapsed(true)}
+            className="text-slate-400 hover:text-blue-600 transition-colors shrink-0"
+            title="Ocultar menú"
+          >
+            <PanelLeftClose className="w-5 h-5" />
+          </button>
         </div>
 
         <nav className="flex-1 px-4 py-6 space-y-2">
@@ -208,7 +220,17 @@ function AppContent() {
 
         {/* HEADER */}
         <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md shrink-0 z-40">
-          <div className="h-16 flex items-center justify-between px-8">
+          <div className="h-16 flex items-center justify-between px-8 gap-3">
+            {/* Botón para reabrir el menú cuando el sidebar está colapsado */}
+            {sidebarCollapsed && (
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                className="w-9 h-9 shrink-0 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-center text-slate-500 hover:text-blue-600 hover:bg-slate-100 transition-colors"
+                title="Mostrar menú"
+              >
+                <PanelLeftOpen className="w-5 h-5" />
+              </button>
+            )}
             {/* Relojes (C12–C16): momento real siempre; momento simulado solo en Simulación (Día a Día no lo muestra, corre en tiempo real) */}
             <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
               <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
@@ -238,21 +260,20 @@ function AppContent() {
                   </span>
                 </div>
                 {opsMetrics && (
-                  <>
-                    <div className="h-7 w-px bg-slate-200 shrink-0" />
+                  <div className="flex items-center gap-0.5 bg-slate-50 rounded-xl border border-slate-200 px-1.5 py-1 shrink-0">
                     {totalOrders != null && (
-                      <SimStat label="Pedidos tot."    value={totalOrders.toLocaleString()}            className="text-slate-700" />
+                      <KpiPill label="Pedidos"    value={totalOrders.toLocaleString()} tone="text-slate-700" />
                     )}
-                    <SimStat label="Entregadas"        value={opsMetrics.delivered}                    className="text-emerald-700" />
-                    <SimStat label="Sin ruta asig."   value={opsMetrics.pending}                      className="text-amber-700" />
-                    <SimStat label="En tránsito"      value={activeFlightCount}                       className="text-blue-700" />
-                    <SimStat label="Con ruta asig."   value={opsMetrics.assigned}                     className="text-indigo-700" />
-                    <SimStat label="SLA venc."        value={opsMetrics.slaBreaches}                  className="text-red-600" />
-                    <SimStat label="Bultos/hora"      value={opsMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
-                    <div className="h-7 w-px bg-slate-200 shrink-0" />
-                    <OccupancyStat label="Ocup. flota"  pct={opsMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
-                    <OccupancyStat label="Ocup. almac." pct={opsMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
-                  </>
+                    <KpiPill label="Entregadas" value={opsMetrics.delivered}   tone="text-emerald-700" dot="#10b981" />
+                    <KpiPill label="En tránsito" value={activeFlightCount}     tone="text-blue-700"    dot="#3b82f6" />
+                    <KpiPill label="Con ruta"    value={opsMetrics.assigned}   tone="text-indigo-700"  dot="#6366f1" />
+                    <KpiPill label="Sin ruta"    value={opsMetrics.pending}    tone="text-amber-700"   dot="#f59e0b" />
+                    <KpiPill label="SLA venc."   value={opsMetrics.slaBreaches} tone="text-red-600"    dot="#ef4444" />
+                    <KpiPill label="Bultos/h"    value={opsMetrics.throughputPerHour.toFixed(1)} tone="text-violet-700" />
+                    <div className="h-8 w-px bg-slate-200 mx-1 shrink-0" />
+                    <OccupancyStat label="Flota"   pct={opsMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
+                    <OccupancyStat label="Almacén" pct={opsMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
+                  </div>
                 )}
               </div>
             )}
@@ -299,18 +320,17 @@ function AppContent() {
                       </button>
                     </div>
                     {dashboardMetrics && (
-                      <>
-                        <div className="h-7 w-px bg-slate-200 shrink-0" />
-                        <SimStat label="Entregadas"      value={dashboardMetrics.delivered}                    className="text-emerald-700" />
-                        <SimStat label="Sin ruta asig." value={dashboardMetrics.pending}                      className="text-amber-700" />
-                        <SimStat label="En tránsito"    value={dashboardMetrics.inFlight}                     className="text-blue-700" />
-                        <SimStat label="Con ruta asig." value={dashboardMetrics.assigned}                     className="text-indigo-700" />
-                        <SimStat label="SLA venc."      value={dashboardMetrics.slaBreaches}                  className="text-red-600" onClick={session?.id ? () => setSlaModalOpen(true) : undefined} />
-                        <SimStat label="Bultos/hora"    value={dashboardMetrics.throughputPerHour.toFixed(1)} className="text-violet-700" />
-                        <div className="h-7 w-px bg-slate-200 shrink-0" />
-                        <OccupancyStat label="Ocup. flota"  pct={dashboardMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
-                        <OccupancyStat label="Ocup. almac." pct={dashboardMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
-                      </>
+                      <div className="flex items-center gap-0.5 bg-slate-50 rounded-xl border border-slate-200 px-1.5 py-1 shrink-0">
+                        <KpiPill label="Entregadas" value={dashboardMetrics.delivered}  tone="text-emerald-700" dot="#10b981" />
+                        <KpiPill label="En tránsito" value={dashboardMetrics.inFlight}   tone="text-blue-700"    dot="#3b82f6" />
+                        <KpiPill label="Con ruta"    value={dashboardMetrics.assigned}   tone="text-indigo-700"  dot="#6366f1" />
+                        <KpiPill label="Sin ruta"    value={dashboardMetrics.pending}    tone="text-amber-700"   dot="#f59e0b" />
+                        <KpiPill label="SLA venc."   value={dashboardMetrics.slaBreaches} tone="text-red-600"    dot="#ef4444" onClick={session?.id ? () => setSlaModalOpen(true) : undefined} />
+                        <KpiPill label="Bultos/h"    value={dashboardMetrics.throughputPerHour.toFixed(1)} tone="text-violet-700" />
+                        <div className="h-8 w-px bg-slate-200 mx-1 shrink-0" />
+                        <OccupancyStat label="Flota"   pct={dashboardMetrics.fleetOccupancyPct}   title="Ocupación global de la flota: maletas en vuelo + asignadas / capacidad total de vuelos (LE-101)" />
+                        <OccupancyStat label="Almacén" pct={dashboardMetrics.airportOccupancyPct} title="Ocupación global de almacenes: maletas en aeropuertos / capacidad total de almacenes (LE-102)" />
+                      </div>
                     )}
                   </>
                 ) : (
@@ -721,6 +741,27 @@ function OccupancyStat({ label, pct, title }: { label: string; pct?: number | nu
         <span className={cn('w-2 h-2 rounded-full shrink-0', v.dot, pct != null && pct > 85 && 'animate-pulse')} />
         {pct == null || isNaN(pct) ? '—' : `${pct.toFixed(1)}%`}
       </span>
+    </div>
+  );
+}
+
+// KPI compacto para la barra superior: etiqueta corta con punto de semáforo y
+// número grande. Agrupados en un contenedor dan una lectura mucho más limpia que
+// la antigua tira de textos diminutos.
+function KpiPill({ label, value, tone, dot, onClick }: {
+  label: string; value: React.ReactNode; tone: string; dot?: string; onClick?: () => void;
+}) {
+  return (
+    <div
+      className={cn('flex flex-col items-start px-2 py-0.5 rounded-lg shrink-0', onClick && 'cursor-pointer hover:bg-white transition-colors')}
+      onClick={onClick}
+      title={onClick ? 'Ver detalle de incumplimientos' : undefined}
+    >
+      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap flex items-center gap-1">
+        {dot && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />}
+        {label}
+      </span>
+      <span className={cn('text-[15px] font-black font-mono leading-tight', tone)}>{value}</span>
     </div>
   );
 }

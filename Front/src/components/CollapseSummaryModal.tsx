@@ -6,8 +6,9 @@ import { LastSolutionModal } from './LastSolutionModal';
 import { useUserTimezone } from '../hooks/useUserTimezone';
 
 const REASON_LABELS: Record<string, string> = {
-  DEADLINE_EXCEEDED: 'Una maleta superó su fecha límite de entrega',
-  NO_VIABLE_ROUTE:   'No se encontró ruta viable tras varios ciclos consecutivos de optimización',
+  DEADLINE_EXCEEDED:  'Una maleta superó su fecha límite de entrega (SLA vencido)',
+  NO_VIABLE_ROUTE:    'No se encontró ruta viable tras varios ciclos consecutivos de optimización',
+  WAREHOUSE_OVERFLOW: 'Un almacén superó su capacidad de almacenamiento',
 };
 
 function fmtDuration(ms: number, unitsLabel: [string, string]): string {
@@ -50,7 +51,11 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
         <div className="px-8 py-6 space-y-5 overflow-y-auto custom-scrollbar">
           <p className="text-sm text-slate-700 leading-relaxed">
             {REASON_LABELS[result.reason] ?? result.reason}
-            {result.baggageId && <> (maleta <span className="font-mono font-bold">{result.baggageId}</span>)</>}
+            {result.baggageId && (
+              result.reason === 'WAREHOUSE_OVERFLOW'
+                ? <> (almacén <span className="font-mono font-bold">{result.baggageId}</span>)</>
+                : <> (maleta <span className="font-mono font-bold">{result.baggageId}</span>)</>
+            )}
           </p>
 
           <div className="grid grid-cols-2 gap-3">

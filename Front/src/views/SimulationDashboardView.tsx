@@ -725,7 +725,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [selectedScenario, setSelectedScenario] = useState<SimulationScenario>(SCENARIOS.PERIOD_5D);
   const [startDate, setStartDate] = useState('');
   const [startTime, setStartTime] = useState('00:00');
-  const [durationDays, setDurationDays] = useState<3 | 5 | 7>(5); // LE-69
+  const durationDays = 5; // periodo fijo de 5 días (opciones 3/7 retiradas)
   const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [showCollapseWarning, setShowCollapseWarning] = useState(false);
   // Comparativa de ejecuciones (LE-76)
@@ -801,16 +801,19 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
 
   const focusOnAirport = useCallback((icao: string) => {
-    setSelectedAirportId(prev => prev === icao ? null : icao);
+    const isDeselect = selectedAirportId === icao;
+    setSelectedAirportId(isDeselect ? null : icao);
     setSelectedShipmentId(null);
     setRouteOverlay(null);
+    // Al deseleccionar (segundo click en el mismo aeropuerto) volver a la vista base.
+    if (isDeselect) { resetZoom(); return; }
     const hub = projectedHubs.find(h => h.id === icao);
     if (!hub) return;
     const targetK = 5;
     const W = MAP_VIEWBOX.width;
     const H = MAP_VIEWBOX.height;
     setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
-  }, [projectedHubs, clamp]);
+  }, [selectedAirportId, projectedHubs, clamp, resetZoom]);
 
   // ── Vuelo seleccionado en el mapa ────────────────────────────────────────
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
@@ -864,12 +867,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setSelectedAirportId(null);
       setSelectedShipmentId(null);
       setRouteOverlay(null);
+      resetZoom();   // deseleccionar → volver a la vista base
       return;
     }
     setSelectedShipmentId(null);
     setRouteOverlay(null);
     selectFlight(sf);
-  }, [selectedFlightId, selectFlight]);
+  }, [selectedFlightId, selectFlight, resetZoom]);
 
   // Resuelve el SeenFlight correcto para un SimFlight del API (registrándolo en
   // seenFlights si hace falta) sin seleccionarlo — común a focusOnSimFlight (clic
@@ -959,6 +963,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setSelectedShipmentId(null);
       setRouteOverlay(null);
       setSelectedFlightId(null);
+      resetZoom();   // deseleccionar → volver a la vista base
       return;
     }
     try {
@@ -994,7 +999,42 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         fitToHubs(icaos);
       }
     } catch { /* silencioso */ }
-  }, [session?.id, selectedShipmentId, activePlanes, seenFlights, simFlightList, resolveSeenFlight, selectFlight, fitToHubs]);
+  }, [session?.id, selectedShipmentId, activePlanes, seenFlights, simFlightList, resolveSeenFlight, selectFlight, fitToHubs, resetZoom]);
+
+  // Dibuja la ruta de un envío MANTENIENDO el aeropuerto seleccionado/expandido.
+  // Usada al clicar una maleta dentro del panel de un almacén (pestaña Aeropuertos):
+  // el usuario quiere ver la ruta resaltada sin que el desplegable del almacén se
+  // cierre. Por eso NO toca selectedAirportId ni selecciona un vuelo (selectFlight
+  // deselecciona el aeropuerto) — solo pinta el overlay y encuadra la cámara.
+  const showShipmentRouteKeepingAirport = useCallback(async (shipmentId: string) => {
+    if (!session?.id) return;
+    if (selectedShipmentId === shipmentId) {
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      // Deseleccionar: volver al encuadre del aeropuerto abierto (si hay), o a la vista base.
+      const hub = selectedAirportId ? projectedHubs.find(h => h.id === selectedAirportId) : null;
+      if (hub) {
+        const targetK = 5;
+        setViewTransform(clamp(
+          MAP_VIEWBOX.width / 2 - hub.projectedX! * targetK,
+          MAP_VIEWBOX.height / 2 - hub.projectedY! * targetK,
+          targetK,
+        ));
+      } else {
+        resetZoom();
+      }
+      return;
+    }
+    try {
+      const legs = await simulationService.getShipmentRoute(session.id, shipmentId);
+      if (legs.length === 0) return;
+      setSelectedShipmentId(shipmentId);
+      setRouteOverlay({ shipmentId, legs });
+      // Encuadra la ruta sin cambiar la selección de aeropuerto ni de vuelo.
+      const icaos = [legs[0].fromIcao, ...legs.map(l => l.toIcao)];
+      fitToHubs(icaos);
+    } catch { /* silencioso */ }
+  }, [session?.id, selectedShipmentId, selectedAirportId, projectedHubs, clamp, fitToHubs, resetZoom]);
 
   // ── Cámara sigue al avión seleccionado con RAF (fluido, sin escalonado) ──
   const selectedFlightIdRef = useRef<string | null>(null);
@@ -1109,10 +1149,17 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       {/* ── MAPA BASE ──────────────────────────────────────────────────────── */}
       <svg
         ref={svgRef}
-        className="w-full h-full"
-        style={{ cursor: isPanning.current ? 'grabbing' : 'grab' }}
+        className="absolute inset-y-0 left-0"
+        style={{
+          cursor: isPanning.current ? 'grabbing' : 'grab',
+          // El panel derecho de detalle ya no tapa el mapa: cuando está abierto, el
+          // SVG se encoge hasta el borde del panel (misma anchura que éste) y el mapa
+          // se reajusta al área visible. Al cerrarlo vuelve a ocupar todo el ancho.
+          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : 0,
+          transition: 'right 0.25s ease',
+        }}
         viewBox={`0 0 ${MAP_VIEWBOX.width} ${MAP_VIEWBOX.height}`}
-        preserveAspectRatio="xMidYMid meet"
+        preserveAspectRatio="none"
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -1183,6 +1230,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                     stroke="#ef4444"
                     strokeWidth={0.8 / viewTransform.k}
                     fill="none"
+                    strokeLinecap="round"
+                    strokeDasharray={`${3 / viewTransform.k} ${3 / viewTransform.k}`}
                     opacity={dimmed ? 0.10 : 0.45}
                   />
                 );
@@ -1266,7 +1315,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                     fill="none"
                     opacity={0.95}
                     strokeLinecap="round"
-                    strokeDasharray={planned ? `${5 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                    // Tramos planificados con guiones más largos; tramos ya
+                    // recorridos / en vuelo con punteado más fino — pero nunca
+                    // una línea completamente sólida.
+                    strokeDasharray={planned
+                      ? `${5 / viewTransform.k} ${4 / viewTransform.k}`
+                      : `${2.5 / viewTransform.k} ${2.5 / viewTransform.k}`}
                   />
                 );
               })}
@@ -1425,21 +1479,31 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                       strokeWidth={1.2 / viewTransform.k}
                       strokeDasharray={`${3.5 / viewTransform.k} ${2.5 / viewTransform.k}`} />
                   )}
-                  {/* Diamante (cuadrado rotado 45°) — marcador de aeropuerto */}
-                  <rect
-                    x={x - r * 0.82} y={y - r * 0.82}
-                    width={r * 1.64} height={r * 1.64}
-                    rx={r * 0.28}
-                    fill={storageColor}
-                    stroke="white"
-                    strokeWidth={1.4 / viewTransform.k}
-                    transform={`rotate(45,${x},${y})`}
-                  />
-                  {/* Cruz de pistas interior */}
-                  <line x1={x - r * 0.42} y1={y} x2={x + r * 0.42} y2={y}
-                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
-                  <line x1={x} y1={y - r * 0.42} x2={x} y2={y + r * 0.42}
-                    stroke="white" strokeWidth={0.9 / viewTransform.k} strokeLinecap="round" />
+                  {/* Marcador de ALMACÉN (aeropuerto): silueta de nave con techo a
+                      dos aguas y portón. Mantiene color de semáforo, borde y demás;
+                      solo cambia la forma (antes era un rombo). */}
+                  {(() => {
+                    const w    = r * 1.0;            // media anchura
+                    const hh   = r * 0.9;            // media altura
+                    const eave = y - hh * 0.15;      // alero (inicio del techo)
+                    const base = y + hh;             // piso
+                    const sw   = viewTransform.k;
+                    const silhouette =
+                      `M ${x - w} ${base} L ${x - w} ${eave} L ${x} ${y - hh} L ${x + w} ${eave} L ${x + w} ${base} Z`;
+                    const doorW = w * 0.5, doorH = hh * 0.8;
+                    return (
+                      <>
+                        <path d={silhouette} fill={storageColor} stroke="white"
+                          strokeWidth={1.4 / sw} strokeLinejoin="round" />
+                        {/* Alero: separa el techo del cuerpo */}
+                        <line x1={x - w} y1={eave} x2={x + w} y2={eave}
+                          stroke="white" strokeWidth={0.8 / sw} strokeLinecap="round" />
+                        {/* Portón del almacén */}
+                        <rect x={x - doorW / 2} y={base - doorH} width={doorW} height={doorH}
+                          rx={r * 0.12} fill="white" opacity={0.92} />
+                      </>
+                    );
+                  })()}
                   {/* Etiqueta */}
                   <rect
                     x={x - 28 / viewTransform.k} y={y - 20 / viewTransform.k}
@@ -1698,39 +1762,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                           )}
                         </div>
                         <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
-                          {s === SCENARIOS.PERIOD_5D && 'Simula 3, 5 o 7 días desde la fecha elegida (~90 min reales)'}
+                          {s === SCENARIOS.PERIOD_5D && 'Simula 5 días desde la fecha elegida (~90 min reales)'}
                           {s === SCENARIOS.COLLAPSE  && 'Prueba de estrés hasta el colapso'}
                         </p>
                       </div>
                     </label>
                   ))}
                 </div>
-
-                {selectedScenario === SCENARIOS.PERIOD_5D && (
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-bold uppercase tracking-widest block text-indigo-600">
-                      Duración del periodo (LE-69)
-                    </label>
-                    <div className="flex gap-2">
-                      {([3, 5, 7] as const).map(d => (
-                        <button
-                          key={d}
-                          type="button"
-                          onClick={() => setDurationDays(d)}
-                          disabled={isLoading}
-                          className={cn(
-                            'flex-1 py-2 rounded-xl border text-sm font-black transition-colors',
-                            durationDays === d
-                              ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20'
-                              : 'bg-white border-indigo-200 text-indigo-700 hover:bg-indigo-50'
-                          )}
-                        >
-                          {d} días
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
 
                 {(selectedScenario === SCENARIOS.PERIOD_5D || selectedScenario === SCENARIOS.COLLAPSE) && (
                   <div className="space-y-2">
@@ -1798,8 +1836,16 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           )}
         </AnimatePresence>
 
-      {/* ── BOTÓN LEYENDA (flotante en mapa, esquina inferior izquierda) ───── */}
-      <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-start">
+      {/* ── BOTONES FLOTANTES (Leyenda, Alertas, Cancelar vuelos, Comparar) ──
+          Ahora en la esquina inferior DERECHA. Cuando el panel de detalle está
+          abierto se corren a la izquierda del panel para no quedar tapados. */}
+      <div
+        className="absolute bottom-4 z-30 flex flex-col gap-2 items-end"
+        style={{
+          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : '16px',
+          transition: 'right 0.25s ease',
+        }}
+      >
         <AnimatePresence>
           {legendOpen && (
             <motion.div
@@ -1910,6 +1956,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               onSelectAirport={handleSelectAirportFromPanel}
               onSelectFlight={focusOnSimFlight}
               onSelectShipment={focusOnShipment}
+              onShowAirportShipmentRoute={showShipmentRouteKeepingAirport}
               shipmentsInFlight={shipmentsInFlight}
               activeTab={infoPanelTab}
               onTabChange={setInfoPanelTab}
