@@ -395,7 +395,7 @@ function AppContent() {
                       exit={{ opacity: 0, y: -8, scaleY: 0.95 }}
                       transition={{ duration: 0.15 }}
                       style={{ transformOrigin: 'top center' }}
-                      className="absolute top-full right-0 mt-2 w-[520px] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden z-50"
+                      className="absolute top-full left-0 mt-2 w-[520px] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden z-50"
                     >
                       {/* Cabecera del panel */}
                       <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
@@ -519,6 +519,7 @@ function AppContent() {
               paused={session.status === 'paused'}
               simElapsed={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
               realElapsed={formatRealElapsed(elapsedRealMs)}
+              autoCollapse={activeView !== 'simulation'}
             />
           )}
 

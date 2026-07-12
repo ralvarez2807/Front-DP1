@@ -63,7 +63,7 @@ export function SlaAlertsButton({ shipments, simNowMs, onSelectShipment }: SlaAl
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.15 }}
-            className="absolute bottom-full left-0 mb-2 w-[320px] bg-white/97 backdrop-blur-md rounded-2xl border border-amber-200 shadow-2xl overflow-hidden"
+            className="absolute bottom-full right-0 mb-2 w-[320px] bg-white/97 backdrop-blur-md rounded-2xl border border-amber-200 shadow-2xl overflow-hidden"
           >
             <div className="px-4 py-3 bg-amber-50 border-b border-amber-100">
               <p className="text-[11px] font-black uppercase tracking-widest text-amber-700">
