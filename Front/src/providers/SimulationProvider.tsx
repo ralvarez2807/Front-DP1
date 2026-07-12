@@ -265,7 +265,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const unsub = socket.on('SIMULATION_ENDED', ({ payload }: {
       payload: { simTime: string; status: string; collapseReason: string | null };
     }) => {
-      const status = payload?.status?.toLowerCase() as SimulationSession['status'];
+      const status = payload?.status?.toLowerCase() as 'stopped' | 'completed' | 'collapsed';
       if (!status) return;
       // Captura si YA se había limpiado la sesión por otra vía (típicamente
       // COLLAPSE_DETECTED, que llega antes y trae más detalle para su propio

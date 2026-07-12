@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 
 /**
  * Tamaño en píxeles del rectángulo más grande con relación de aspecto
@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react';
  * lateral se abre/cierra y el contenedor cambia de ancho.
  */
 export function useContainBoxSize(
-  containerRef: React.RefObject<HTMLElement | null>,
+  containerRef: RefObject<HTMLElement | null>,
   aspectW: number,
   aspectH: number
 ): { width: number; height: number } {
