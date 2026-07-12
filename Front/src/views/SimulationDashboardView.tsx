@@ -282,6 +282,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (session?.speedFactor) simSpeedRef.current = session.speedFactor;
   }, [session?.speedFactor]);
 
+  // Reloj simulado actual espejado en un ref, para leerlo dentro de los handlers
+  // del WS sin closures obsoletos (se usa para diferir el parpadeo de una
+  // cancelación cuya salida está en el futuro — p.ej. la del día siguiente).
+  const currentSimMsRef = useRef<number | null>(null);
+
   // ── Carga real de vuelos (polling) ──────────────────────────────────────
   const fetchFlightLoadsRef = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
@@ -634,8 +639,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     });
 
     // FLIGHT_CANCELLED: quitar el avión si estaba en el aire y hacer parpadear la
-    // ruta afectada durante un tiempo (D14/D15). El payload solo trae flightId —
-    // las ICAO se derivan del propio ID ("SKBO-SEQM-19:00-20260103").
+    // ruta afectada (D14/D15). Las ICAO se derivan del ID ("SKBO-SEQM-19:00").
+    // El evento trae depTimeUtc = salida de la INSTANCIA cancelada: si es una salida
+    // futura (p.ej. la de mañana por la regla de 1h), el parpadeo NO debe verse ahora
+    // sobre la ruta de hoy — se difiere hasta que el reloj simulado llegue a esa hora.
     const unsubCancelled = socket.on('FLIGHT_CANCELLED', ({ payload }: { payload: any }) => {
       const fid = payload?.flightId ?? payload?.flightScheduleKey;
       if (!fid) return;
@@ -647,13 +654,31 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       setActivePlanes(prev => prev.filter(p => p.flightId !== fid));
       setSeenFlights(prev => prev.map(f => f.flightId === fid ? { ...f, isActive: false } : f));
 
-      const key = `${fid}-${Date.now()}`;
-      setCancelledRoutes(prev => [...prev.filter(c => c.flightId !== fid), { key, flightId: fid, fromIcao, toIcao }]);
-      const timer = setTimeout(() => {
-        setCancelledRoutes(prev => prev.filter(c => c.key !== key));
-        cancelTimersRef.current.delete(key);
-      }, CANCEL_BLINK_MS);
-      cancelTimersRef.current.set(key, timer);
+      const startBlink = () => {
+        const key = `${fid}-${Date.now()}`;
+        setCancelledRoutes(prev => [...prev.filter(c => c.flightId !== fid), { key, flightId: fid, fromIcao, toIcao }]);
+        const timer = setTimeout(() => {
+          setCancelledRoutes(prev => prev.filter(c => c.key !== key));
+          cancelTimersRef.current.delete(key);
+        }, CANCEL_BLINK_MS);
+        cancelTimersRef.current.set(key, timer);
+      };
+
+      // Salida de la instancia cancelada. Si está a más de 1 min en el futuro
+      // simulado, difiere el parpadeo (delay real = Δsim / speedFactor).
+      const depMs    = payload?.depTimeUtc ? new Date(payload.depTimeUtc).getTime() : null;
+      const simNowMs = currentSimMsRef.current;
+      if (depMs && simNowMs && depMs > simNowMs + 60_000) {
+        const realDelayMs = (depMs - simNowMs) / (simSpeedRef.current || 1);
+        const schedKey    = `sched-${fid}-${Date.now()}`;
+        const schedTimer  = setTimeout(() => {
+          cancelTimersRef.current.delete(schedKey);
+          startBlink();
+        }, realDelayMs);
+        cancelTimersRef.current.set(schedKey, schedTimer);
+      } else {
+        startBlink();
+      }
     });
 
     return () => { unsubDep(); unsubArr(); unsubBagDep(); unsubBagArr(); unsubBagDel(); unsubBagAssigned(); unsubCancelled(); };
@@ -1124,6 +1149,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   // la ruta debe pintarse punteada — no hay nada que seguir.
   const selectedFlightIsActive = !!selectedPlane;
 
+  // ¿El vuelo seleccionado está CANCELADO? (según la lista de vuelos del API).
+  // Se usa para pintar su ruta en ROJO en vez de amarillo al seleccionarlo.
+  const selectedFlightIsCancelled = useMemo(() =>
+    !!selectedFlightId && simFlightList.some(f => f.flightId === selectedFlightId && f.status === 'CANCELLED')
+  , [selectedFlightId, simFlightList]);
+
   // Clave por par origen-destino para evitar desfases por ID de vuelo
   const activeRoutePairSet = useMemo(() => {
     const s = new Set<string>();
@@ -1152,6 +1183,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (lastSimUpdate) return lastSimUpdate.simMs;
     return new Date(session.startTimeAt).getTime() + (session.currentTimeAt || 0) * 3_600_000;
   }, [session?.startTimeAt, session?.currentTimeAt, lastSimUpdate]);
+  useEffect(() => { currentSimMsRef.current = currentSimMsVal; }, [currentSimMsVal]);
 
   // Congela la animación de aviones cuando la simulación está en pausa, y la
   // reanuda sin salto. Sin esto los aviones seguían deslizándose con el reloj real.
@@ -1243,15 +1275,18 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               const dimmed = selectedFlightId && !isSelected;
 
               if (isSelected) {
+                // Vuelo CANCELADO seleccionado → rojo (no el amarillo de "seleccionado").
                 return (
                   <path
                     key={flight.id}
                     d={flight.projectedPath}
-                    stroke="#f59e0b"
+                    stroke={selectedFlightIsCancelled ? '#dc2626' : '#f59e0b'}
                     strokeWidth={1.5 / viewTransform.k}
                     fill="none"
                     opacity={0.95}
-                    strokeDasharray={!selectedFlightIsActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined}
+                    strokeDasharray={selectedFlightIsCancelled
+                      ? `${6 / viewTransform.k} ${4 / viewTransform.k}`
+                      : (!selectedFlightIsActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined)}
                   />
                 );
               }

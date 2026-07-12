@@ -410,7 +410,17 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       {/* Contenedor letterbox: centra el SVG manteniendo siempre su proporción
           real 3:2 — el mapa ya no se estira/deforma para llenar el hueco, solo
           se escala uniformemente para aprovechar el máximo espacio posible. */}
-      <div ref={mapContainerRef} className="absolute inset-0 flex items-center justify-center overflow-hidden">
+      <div
+        ref={mapContainerRef}
+        className="absolute inset-y-0 left-0 flex items-center justify-center overflow-hidden"
+        style={{
+          // Igual que en SimulationDashboardView: el contenedor se encoge hasta el
+          // borde del panel derecho cuando está abierto (no lo tapa); al cerrarlo
+          // vuelve a ocupar todo el ancho. El letterbox reajusta el mapa al área.
+          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : 0,
+          transition: 'right 0.25s ease',
+        }}
+      >
       <svg
         ref={svgRef}
         style={{
@@ -893,8 +903,16 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         </button>
       </div>
 
-      {/* ── BOTÓN LEYENDA (inferior izquierda) ──────────────────────────────── */}
-      <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-start">
+      {/* ── BOTONES FLOTANTES (inferior derecha, igual que Simulación) ────────
+          Cuando el panel de detalle está abierto se corren a la izquierda del
+          panel para no quedar tapados. */}
+      <div
+        className="absolute bottom-4 z-30 flex flex-col gap-2 items-end"
+        style={{
+          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : '16px',
+          transition: 'right 0.25s ease',
+        }}
+      >
         {toolbarOpen && (
         <>
         <AnimatePresence>

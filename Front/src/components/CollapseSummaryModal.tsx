@@ -4,6 +4,7 @@ import { CollapseResult } from '../providers/SimulationProvider';
 import { ReportRows } from './SummaryReportModal';
 import { LastSolutionModal } from './LastSolutionModal';
 import { useUserTimezone } from '../hooks/useUserTimezone';
+import { formatUserDayTime } from '../lib/timezone';
 
 const REASON_LABELS: Record<string, string> = {
   DEADLINE_EXCEEDED:  'Una maleta superó su fecha límite de entrega (SLA vencido)',
@@ -57,6 +58,12 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
                 : <> (maleta <span className="font-mono font-bold">{result.baggageId}</span>)</>
             )}
           </p>
+
+          {/* Momento exacto del colapso en tiempo simulado (viene de payload.simTime). */}
+          <div className="bg-rose-50 border border-rose-100 rounded-xl px-4 py-3">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-rose-400">Momento del colapso (simulado)</p>
+            <p className="text-base font-black text-rose-900">{formatUserDayTime(result.simTime, gmtOffset)}</p>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-slate-50 rounded-xl px-4 py-3">
