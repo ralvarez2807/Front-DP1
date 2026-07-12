@@ -9,6 +9,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useSimulationContext } from '../providers/SimulationProvider';
 import { useSocket } from '../providers/SocketProvider';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
+
+// Margen de arrastre disponible incluso al zoom mínimo (k=1) — ver comentario en `clamp`.
+const PAN_SLACK = 260;
 import { AvailableDayPicker } from '../components/AvailableDayPicker';
 import { hubService } from '../services/hubService';
 import { simulationService, SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
@@ -22,6 +25,7 @@ import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 import { localTodayString, formatGmtLabel } from '../lib/timezone';
 import { useUserTimezone } from '../hooks/useUserTimezone';
+import { useContainBoxSize } from '../hooks/useContainBoxSize';
 
 // Fallback de velocidad si el backend aún no respondió con su speedFactor real.
 const SIM_SPEED_FALLBACK = 80;
@@ -211,6 +215,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   // Popover de leyenda flotante en el mapa
   const [legendOpen, setLegendOpen] = useState(false);
+  // Barra flotante de opciones (Leyenda/Alertas/Cancelar vuelos/Comparar) — ocultable con un botón.
+  // Se persiste en localStorage (misma clave que usa Día a Día) para recordar cómo quedó entre recargas.
+  const [toolbarOpen, setToolbarOpen] = useState(
+    () => localStorage.getItem('map_toolbar_open') !== 'false'
+  );
+  useEffect(() => {
+    localStorage.setItem('map_toolbar_open', String(toolbarOpen));
+  }, [toolbarOpen]);
   // Última solución exitosa: rutas asignadas (GET /simulations/:id/result)
   const [lastSolutionOpen, setLastSolutionOpen] = useState(false);
   const simHubLoads = useMemo(() => {
@@ -343,17 +355,26 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
   // ── Zoom / Pan ────────────────────────────────────────────────────────────
   const svgRef = useRef<SVGSVGElement>(null);
+  // Contenedor "letterbox": el SVG mantiene siempre la proporción real del
+  // viewBox (3:2) dentro de este contenedor, en vez de estirarse para llenarlo
+  // — así el mapa nunca se ve deformado, sea cual sea la forma del panel visible.
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapBoxSize = useContainBoxSize(mapContainerRef, MAP_VIEWBOX.width, MAP_VIEWBOX.height);
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, k: 1 });
   const isPanning = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
 
-  // Clamp para que el mapa siempre cubra el viewport y no se salga por ningún lado
+  // Clamp para que el mapa siempre cubra el viewport y no se salga por ningún lado.
+  // PAN_SLACK da margen de arrastre incluso al zoom mínimo (k=1): sin esto, en k=1
+  // los límites colapsaban a exactamente 0 y el mapa quedaba imposible de mover
+  // con el mouse. El rect de océano se dibuja PAN_SLACK más grande que el viewBox
+  // (ver más abajo) para que ese margen nunca revele canvas en blanco.
   const clamp = useCallback((x: number, y: number, k: number) => {
     const W = MAP_VIEWBOX.width;
     const H = MAP_VIEWBOX.height;
     const clampedK = Math.max(1, Math.min(12, k)); // mínimo 1 para que siempre cubra
-    const clampedX = Math.max(W * (1 - clampedK), Math.min(0, x));
-    const clampedY = Math.max(H * (1 - clampedK), Math.min(0, y));
+    const clampedX = Math.max(W * (1 - clampedK) - PAN_SLACK, Math.min(PAN_SLACK, x));
+    const clampedY = Math.max(H * (1 - clampedK) - PAN_SLACK, Math.min(PAN_SLACK, y));
     return { x: clampedX, y: clampedY, k: clampedK };
   }, []);
 
@@ -1147,16 +1168,24 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
 
       {/* ── MAPA BASE ──────────────────────────────────────────────────────── */}
-      <svg
-        ref={svgRef}
-        className="absolute inset-y-0 left-0"
+      {/* Contenedor letterbox: ocupa el área visible (se encoge cuando el panel
+          derecho está abierto) y centra el SVG manteniendo siempre su proporción
+          real 3:2 — el mapa ya no se estira/deforma para llenar el hueco, solo
+          se escala uniformemente para aprovechar el máximo espacio posible. */}
+      <div
+        ref={mapContainerRef}
+        className="absolute inset-y-0 left-0 flex items-center justify-center overflow-hidden"
         style={{
-          cursor: isPanning.current ? 'grabbing' : 'grab',
-          // El panel derecho de detalle ya no tapa el mapa: cuando está abierto, el
-          // SVG se encoge hasta el borde del panel (misma anchura que éste) y el mapa
-          // se reajusta al área visible. Al cerrarlo vuelve a ocupar todo el ancho.
           right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : 0,
           transition: 'right 0.25s ease',
+        }}
+      >
+      <svg
+        ref={svgRef}
+        style={{
+          cursor: isPanning.current ? 'grabbing' : 'grab',
+          width: mapBoxSize.width,
+          height: mapBoxSize.height,
         }}
         viewBox={`0 0 ${MAP_VIEWBOX.width} ${MAP_VIEWBOX.height}`}
         preserveAspectRatio="none"
@@ -1178,8 +1207,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         </defs>
 
         <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
-          {/* Océano */}
-          <rect x="0" y="0" width={MAP_VIEWBOX.width} height={MAP_VIEWBOX.height} fill="#a8cfe8" />
+          {/* Océano — más grande que el viewBox para cubrir el margen de PAN_SLACK */}
+          <rect
+            x={-PAN_SLACK} y={-PAN_SLACK}
+            width={MAP_VIEWBOX.width + 2 * PAN_SLACK} height={MAP_VIEWBOX.height + 2 * PAN_SLACK}
+            fill="#a8cfe8"
+          />
 
           {/* Países */}
           {worldData && pathGenerator && (
@@ -1527,6 +1560,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           </g>
         </g>
       </svg>
+      </div>
 
       {/* ── TOOLTIP HUB ─────────────────────────────────────────────────────── */}
       <AnimatePresence>
@@ -1846,6 +1880,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           transition: 'right 0.25s ease',
         }}
       >
+        {toolbarOpen && (
+        <>
         <AnimatePresence>
           {legendOpen && (
             <motion.div
@@ -1922,6 +1958,16 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           title="Comparar el desempeño de dos ejecuciones anteriores"
         >
           <LayoutGrid className="w-4 h-4" /> Comparar corridas
+        </button>
+        </>
+        )}
+        <button
+          onClick={() => setToolbarOpen(v => !v)}
+          className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-slate-500 border border-slate-200 hover:bg-slate-50"
+          title={toolbarOpen ? 'Ocultar opciones' : 'Mostrar opciones'}
+        >
+          {toolbarOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+          {!toolbarOpen && 'Opciones'}
         </button>
       </div>
 

@@ -138,8 +138,11 @@ normal, no un modo aparte en el backend:
   colapso, publica el evento WS `COLLAPSE_DETECTED` y detiene la sesión, terminando en
   `status: COLLAPSED` (status propio, distinto de `COMPLETED` — agregado al backend
   posteriormente; el frontend lo trata como terminal en los tres lugares que verifican status
-  de sesión: rehidratación vía `getMine`, el handler de `SIM_STATUS`, y el polling de
+  de sesión: rehidratación vía `getMine`, el handler de `SIMULATION_ENDED`, y el polling de
   respaldo en `SimulationProvider`, todos en `'stopped' | 'completed' | 'collapsed'`).
+  `reason` puede ser `DEADLINE_EXCEEDED`, `NO_VIABLE_ROUTE` o `WAREHOUSE_OVERFLOW` (ver
+  `REASON_LABELS` en `CollapseSummaryModal.tsx`, que también distingue el label de
+  `baggageId` — "almacén" en vez de "maleta" — para este último caso).
   El cierre de UI normalmente ya ocurre antes, vía el evento dedicado `COLLAPSE_DETECTED`
   (ver más abajo) — el status `collapsed` es la red de seguridad para cuando el WS no llega
   (reconexión, polling de respaldo).
@@ -172,8 +175,18 @@ Envelope: `{ "seq": 42, "type": "BAGGAGE_DEPARTED", "simTime": "...", "payload":
 - `seq` es incremental por sesión (desde 0). Si hay gap → emite `RESYNC_NEEDED` → llama al snapshot
 - Duplicados (`seq <= lastSeq`) se descartan silenciosamente
 - `lastSeq` se resetea a `-1` en cada `connect()` (nueva sesión), pero NO en reconexiones automáticas (para detectar gaps tras caída)
-- Evento especial `SIM_STATUS { status }` actualiza el estado de la sesión; si es `stopped/completed` cierra automáticamente
-- Evento especial `COLLAPSE_DETECTED { simTime, reason, baggageId, deadline, consecutiveCycles }` — solo si la sesión se creó con `collapseOnFailure: true` (ver "Simulación hasta el colapso")
+- Evento especial `SIMULATION_ENDED { simTime, status, collapseReason }` — cierre autoritativo de
+  la sesión, publicado para los TRES finales (`COMPLETED | COLLAPSED | STOPPED`) justo antes de que
+  el backend cierre el socket limpio (`CloseStatus.NORMAL`); `collapseReason` solo si
+  `status === 'COLLAPSED'`. Reemplaza al viejo `SIM_STATUS`, que nunca llegó a implementarse en el
+  backend (era código muerto en el frontend — confirmado en el switch de
+  `InMemoryStatePublisher.eventType()`, que no lo contemplaba). Antes de este evento, "completed"
+  solo se detectaba por el polling de respaldo (hasta 4s de drift, o nunca si el WS quedaba abierto
+  y mudo — bug de backend ya corregido: el wrapper del hilo de simulación no cerraba los publishers
+  al terminar normalmente/colapsar, solo al detener manualmente). El handler en `SimulationProvider`
+  se auto-protege contra procesar el cierre dos veces (p. ej. si `COLLAPSE_DETECTED` ya limpió la
+  sesión primero) revisando si `session` ya es `null` antes de repetir el fetch del reporte/toast.
+- Evento especial `COLLAPSE_DETECTED { simTime, reason, baggageId, deadline, consecutiveCycles }` — solo si la sesión se creó con `collapseOnFailure: true` (ver "Simulación hasta el colapso"). Llega ANTES que `SIMULATION_ENDED` (el runner lo publica en caliente al detectar el colapso; `SIMULATION_ENDED` se publica después, cuando el hilo ya terminó) — por eso sigue siendo la fuente principal del `CollapseSummaryModal`, con más detalle del que trae `SIMULATION_ENDED`.
 
 ## Mapa SVG interactivo (SimulationDashboardView y DailyOperationsView)
 

@@ -31,6 +31,43 @@ const EVENT_MESSAGES: Record<BackendEventType, (p: any) => string> = {
   SHIPMENT_CREATED: (p) => `Envío ${p?.shipmentId}: ${p?.originIcao} → ${p?.destIcao}`,
 };
 
+// ── Ancla real de "cuándo arrancó la sesión" (para T. Real) ──────────────────
+// El backend no manda tiempo real transcurrido (ver docs), así que se ancla al
+// reloj del navegador que crea/recupera la sesión. Se persiste en localStorage
+// para que sobreviva recargas de página y se comparta entre pestañas del mismo
+// navegador — sin esto, cada pestaña/recarga perdía el ancla y "T. Real" se
+// veía reiniciado en 0 en vez de continuar donde iba la sesión real.
+const SESSION_STARTED_KEY = 'session_started_at';
+
+function readStoredStartedAt(sessionId: string): number | null {
+  try {
+    const raw = localStorage.getItem(SESSION_STARTED_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.id === sessionId ? parsed.startedAt : null;
+  } catch {
+    return null;
+  }
+}
+function storeStartedAt(sessionId: string, startedAt: number) {
+  localStorage.setItem(SESSION_STARTED_KEY, JSON.stringify({ id: sessionId, startedAt }));
+}
+function clearStoredStartedAt() {
+  localStorage.removeItem(SESSION_STARTED_KEY);
+}
+
+// Cuando se recupera una sesión que este navegador nunca vio antes (sin ancla
+// guardada), no hay forma de saber el instante real exacto en que arrancó —
+// pero SÍ se puede estimar: simElapsedMs = realElapsedMs * speedFactor (así
+// funciona el acelerador), así que t.real ≈ t.simulado / speedFactor. Es mucho
+// mejor aproximación que asumir "recién arrancó ahora" (lo que hacía que T.Real
+// mostrara 0 y avanzara desde cero pese a que la sesión llevaba horas corriendo).
+function estimateStartedAt(simStartIso: string, simTimeIso: string, speedFactor: number): number {
+  const simElapsedMs = new Date(simTimeIso).getTime() - new Date(simStartIso).getTime();
+  const estimatedRealElapsedMs = speedFactor > 0 ? simElapsedMs / speedFactor : 0;
+  return Date.now() - Math.max(0, estimatedRealElapsedMs);
+}
+
 function toOperationalEvent(type: BackendEventType, payload: any, simTime?: string): OperationalEvent {
   return {
     id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -98,6 +135,9 @@ interface SimulationContextType {
   collapseResult: CollapseResult | null;
   clearCollapseResult: () => void;
   dashboardMetrics: DashboardMetrics | null;
+  /** Vuelve a chequear GET /simulations/mine — usado al entrar a la pestaña
+   *  Simulación por si una sesión se creó en otra pestaña después del montaje. */
+  checkForExistingSession: () => Promise<void>;
   createSession: (scenario: SimulationScenario, startDate: string, startTime?: string, durationDays?: number) => Promise<void>;
   startSimulation: () => Promise<void>;
   pauseSimulation: () => Promise<void>;
@@ -150,32 +190,46 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // nunca se reintentaba tras el login — la sesión activa del usuario en otro
   // dispositivo quedaba sin restaurar para siempre. Mismo bug que ya se arregló
   // en MapProvider; aquí se reintenta en cada login (isAuthenticated/user).
-  useEffect(() => {
+  //
+  // Extraída como función reutilizable (no solo efecto al montar) para que la
+  // vista de Simulación pueda volver a llamarla al entrar a esa pestaña — cubre
+  // el caso de una sesión creada en otra pestaña del navegador DESPUÉS de que
+  // esta ya había montado y corrido su chequeo inicial una sola vez.
+  const checkForExistingSession = useCallback(async () => {
     if (!isAuthenticated) return;
-    simulationService.getMine()
-      .then(mine => {
-        if (!mine) return;
-        const status = mine.status?.toLowerCase() as SimulationSession['status'];
-        if (status === 'stopped' || status === 'completed' || status === 'collapsed') return;
+    try {
+      const mine = await simulationService.getMine();
+      if (!mine) return;
+      const status = mine.status?.toLowerCase() as SimulationSession['status'];
+      if (status === 'stopped' || status === 'completed' || status === 'collapsed') return;
 
-        const savedConfig = localStorage.getItem('simulation_config');
-        const config: { scenario: SimulationScenario; speed: number } = savedConfig
-          ? JSON.parse(savedConfig)
-          : { scenario: 'period_5d' as SimulationScenario, speed: 1 };
+      const savedConfig = localStorage.getItem('simulation_config');
+      const config: { scenario: SimulationScenario; speed: number } = savedConfig
+        ? JSON.parse(savedConfig)
+        : { scenario: 'period_5d' as SimulationScenario, speed: 1 };
 
-        simulationService.getSnapshotRaw(mine.id)
-          .then(snapshot => {
-            setSession(simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config));
-            const inFlight = (snapshot.flights ?? [])
-              .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
-              .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
-            if (inFlight.length > 0) setRestoredFlights(inFlight);
-            socketService.connect(mine.id);
-          })
-          .catch(() => {});
-      })
-      .catch(() => {});
+      const snapshot = await simulationService.getSnapshotRaw(mine.id);
+      const mapped = simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config);
+      setSession(mapped);
+      const inFlight = (snapshot.flights ?? [])
+        .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
+        .map((f: any) => ({ ...f, simTime: snapshot.simTime }));
+      if (inFlight.length > 0) setRestoredFlights(inFlight);
+      // Restaura el ancla real de "T. Real": si esta sesión ya se había visto en
+      // este navegador (otra pestaña, o esta misma antes de recargar), reusa su
+      // startedAt. Si no, se estima a partir de t.simulado/speedFactor en vez de
+      // asumir "recién arrancó ahora" (ver `estimateStartedAt`).
+      const startedAt = readStoredStartedAt(mine.id)
+        ?? estimateStartedAt(snapshot.simStart, snapshot.simTime, mapped.speedFactor);
+      storeStartedAt(mine.id, startedAt);
+      setSessionStartedAt(startedAt);
+      socketService.connect(mine.id);
+    } catch {
+      // silencioso: 401 antes del login, red caída, etc. — no hay sesión que restaurar
+    }
   }, [isAuthenticated]);
+
+  useEffect(() => { checkForExistingSession(); }, [checkForExistingSession]);
 
   useEffect(() => {
     const unsubs = BACKEND_EVENTS.map(eventType =>
@@ -199,44 +253,54 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return () => unsubs.forEach(u => u());
   }, [socket]);
 
-  // ── SIM_STATUS: transiciones de estado enviadas por el backend ───────────
+  // ── SIMULATION_ENDED: cierre autoritativo de la sesión por WS ────────────
+  // Reemplaza al viejo listener 'SIM_STATUS': el backend nunca llegó a emitir
+  // ese tipo de evento (no existe en el switch de InMemoryStatePublicher —
+  // era código muerto acá). Antes de esto, "completed"/"stopped" solo se
+  // detectaban vía el polling de respaldo (drift de hasta 4s, o nunca si el
+  // 404 de sesión liberada no llegaba a tiempo). Ahora el backend publica
+  // SIMULATION_ENDED { status, collapseReason } para los tres finales
+  // (COMPLETED/COLLAPSED/STOPPED) justo antes de cerrar el socket limpio.
   useEffect(() => {
-    const unsub = socket.on('SIM_STATUS', ({ payload }: { payload: { status: string } }) => {
+    const unsub = socket.on('SIMULATION_ENDED', ({ payload }: {
+      payload: { simTime: string; status: string; collapseReason: string | null };
+    }) => {
       const status = payload?.status?.toLowerCase() as SimulationSession['status'];
       if (!status) return;
-      if (status === 'stopped' || status === 'completed' || status === 'collapsed') {
-        // Capturar el ID antes de limpiar la sesión
-        setSession(prev => {
-          // "completed" (fin de tiempo) y "stopped" (corte manual, propio o desde
-          // otra pestaña/dispositivo) muestran el mismo reporte de cierre — solo
-          // "collapsed" queda fuera porque COLLAPSE_DETECTED ya lo maneja aparte
-          // y llega antes que este SIM_STATUS de respaldo.
-          if (prev?.id && (status === 'completed' || status === 'stopped')) {
-            const runId = prev.id;
-            const scenario = prev.config?.scenario ?? 'period_5d';
-            // Fetch asíncrono del reporte — no bloquea el render. Además se guarda
-            // en el historial local para la comparativa de ejecuciones (LE-76).
-            simulationService.getSummaryReport(runId)
-              .then(report => {
-                setCompletionReport({ ...report, __outcome: status, __sessionId: runId });
-                saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: status, report });
-              })
-              .catch(() => setCompletionReport({ error: true, __outcome: status, __sessionId: runId }));
-          }
-          return null;
-        });
-        socketService.disconnect();
-        localStorage.removeItem('simulation_config');
-        setEvents([]);
-        setSessionStartedAt(null);
-        setLastSimUpdate(null);
-        // "collapsed" no muestra este toast: el modal de COLLAPSE_DETECTED ya informa el desenlace.
-        if (status !== 'completed' && status !== 'collapsed') {
-          addToast('Simulación detenida externamente', 'info');
-        }
-        return;
+      // Captura si YA se había limpiado la sesión por otra vía (típicamente
+      // COLLAPSE_DETECTED, que llega antes y trae más detalle para su propio
+      // modal) — si es así, este evento es puramente informativo y no debe
+      // repetir el fetch del reporte ni el toast.
+      let alreadyHandled = true;
+      setSession(prev => {
+        if (!prev?.id) return null;
+        alreadyHandled = false;
+        const runId = prev.id;
+        const scenario = prev.config?.scenario ?? 'period_5d';
+        // Fetch asíncrono del reporte — no bloquea el render. Además se guarda
+        // en el historial local para la comparativa de ejecuciones (LE-76).
+        simulationService.getSummaryReport(runId)
+          .then(report => {
+            setCompletionReport({ ...report, __outcome: status, __sessionId: runId });
+            saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: status, report });
+          })
+          .catch(() => setCompletionReport({ error: true, __outcome: status, __sessionId: runId }));
+        return null;
+      });
+      if (alreadyHandled) return;
+      socketService.disconnect();
+      localStorage.removeItem('simulation_config');
+      clearStoredStartedAt();
+      setEvents([]);
+      setSessionStartedAt(null);
+      setLastSimUpdate(null);
+      // "collapsed" no muestra este toast: el modal de colapso ya informa el desenlace.
+      // "completed"/"stopped" desde ESTA pestaña ya se manejan en resetSimulation()
+      // (que se desconecta antes de que este evento pueda llegar); este toast es
+      // para cuando la sesión se cierra vista desde OTRA pestaña/dispositivo.
+      if (status !== 'completed' && status !== 'collapsed') {
+        addToast('Simulación detenida externamente', 'info');
       }
-      setSession(prev => prev ? { ...prev, status } : null);
     });
     return unsub;
   }, [socket, addToast]);
@@ -280,6 +344,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         });
       socketService.disconnect();
       localStorage.removeItem('simulation_config');
+      clearStoredStartedAt();
       setSession(null);
       setEvents([]);
       setSessionStartedAt(null);
@@ -387,6 +452,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       const config = { scenario, speed: 1 };
       localStorage.setItem('simulation_config', JSON.stringify(config));
       let newSession: SimulationSession;
+      let recoveredSnapshot: any = null;
       try {
         newSession = await simulationService.createSession(simStart, simEnd, config, controller.signal);
       } catch (err: any) {
@@ -395,6 +461,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           const mine = await simulationService.getMine(controller.signal);
           if (!mine) throw err;
           const snapshot = await simulationService.getSnapshotRaw(mine.id, controller.signal);
+          recoveredSnapshot = snapshot;
           newSession = simulationService.mapSessionPublic({ ...snapshot, id: mine.id }, config);
           const inFlight = (snapshot.flights ?? [])
             .filter((f: any) => f.status === 'DEPARTED' || f.status === 'IN_FLIGHT')
@@ -409,7 +476,16 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setEvents([]);
       setError(null);
       setCollapseResult(null);
-      setSessionStartedAt(Date.now());
+      // Si se recuperó una sesión ya existente (409), reusa su ancla real si este
+      // navegador ya la había visto antes; si no, la estima a partir de
+      // t.simulado/speedFactor en vez de asumir "recién arrancó ahora" (ver
+      // `estimateStartedAt`) — una sesión recuperada casi siempre lleva rato corriendo.
+      const startedAt = recoveredSnapshot
+        ? (readStoredStartedAt(newSession.id)
+            ?? estimateStartedAt(recoveredSnapshot.simStart, recoveredSnapshot.simTime, newSession.speedFactor))
+        : Date.now();
+      storeStartedAt(newSession.id, startedAt);
+      setSessionStartedAt(startedAt);
       socketService.connect(newSession.id);
       addToast(`Escenario ${scenario} inicializado correctamente`, 'success');
     } catch (err: any) {
@@ -463,6 +539,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
     socketService.disconnect();
     localStorage.removeItem('simulation_config');
+    clearStoredStartedAt();
     setSession(null);
     setEvents([]);
     setSessionStartedAt(null);
@@ -496,12 +573,13 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     collapseResult,
     clearCollapseResult,
     dashboardMetrics,
+    checkForExistingSession,
     createSession,
     startSimulation,
     pauseSimulation,
     resetSimulation,
     injectFault,
-  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, collapseResult, clearCollapseResult, dashboardMetrics, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
+  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, collapseResult, clearCollapseResult, dashboardMetrics, checkForExistingSession, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
 
   return (
     <SimulationContext.Provider value={value}>

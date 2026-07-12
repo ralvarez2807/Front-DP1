@@ -14,6 +14,7 @@ import { useOperationsContext } from './providers/OperationsProvider';
 import { useBulkUploadContext } from './providers/BulkUploadProvider';
 import { SlaBreachesModal } from './components/SlaBreachesModal';
 import { CollapseSummaryModal } from './components/CollapseSummaryModal';
+import { FloatingSimClock } from './components/FloatingSimClock';
 
 import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
@@ -37,7 +38,7 @@ function AppContent() {
   const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
   const {
     session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics,
-    collapseResult, clearCollapseResult,
+    collapseResult, clearCollapseResult, checkForExistingSession,
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
   } = useSimulationContext();
   const {
@@ -56,8 +57,22 @@ function AppContent() {
   const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
   const [activeView, setActiveView] = useState<View>('dashboard');
+  // Al entrar a la pestaña Simulación, si esta pestaña del navegador todavía no
+  // tiene sesión cargada, vuelve a chequear si ya existe una activa en el
+  // servidor (p. ej. creada desde otra pestaña después de que esta app montó).
+  useEffect(() => {
+    if (activeView === 'simulation' && !session) {
+      checkForExistingSession();
+    }
+  }, [activeView, session, checkForExistingSession]);
   // Sidebar colapsable — permite ocultar la navegación para ver el mapa más grande.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Se persiste en localStorage para recordar cómo quedó entre recargas/sesiones.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('sidebar_collapsed') === 'true'
+  );
+  useEffect(() => {
+    localStorage.setItem('sidebar_collapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
   const [hoveredRoute, setHoveredRoute] = useState<any>(null);
   const [hoveredHub,   setHoveredHub]   = useState<any>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -70,16 +85,18 @@ function AppContent() {
   // Modal forense de incumplimientos de SLA (al hacer clic en el contador)
   const [slaModalOpen, setSlaModalOpen] = useState(false);
 
-  // Cronómetro de tiempo real de la sesión activa (solo en pestaña simulación)
+  // Cronómetro de tiempo real de la sesión activa — corre en cualquier pestaña
+  // (el reloj flotante se ve en todas, no solo en Simulación; ver más abajo).
   const [elapsedRealMs, setElapsedRealMs] = useState(0);
   useEffect(() => {
-    if (!sessionStartedAt || !session?.id || activeView !== 'simulation') {
+    if (!sessionStartedAt || !session?.id) {
       setElapsedRealMs(0); return;
     }
     const startedAt = sessionStartedAt;
+    setElapsedRealMs(Date.now() - startedAt);
     const id = setInterval(() => setElapsedRealMs(Date.now() - startedAt), 1000);
     return () => clearInterval(id);
-  }, [sessionStartedAt, session?.id, activeView]);
+  }, [sessionStartedAt, session?.id]);
 
   // Transcurrido al minuto (C13/C15 del checklist docente)
   const formatElapsedMs = (ms: number) => {
@@ -231,24 +248,25 @@ function AppContent() {
                 <PanelLeftOpen className="w-5 h-5" />
               </button>
             )}
-            {/* Relojes (C12–C16): momento real siempre; momento simulado solo en Simulación (Día a Día no lo muestra, corre en tiempo real) */}
-            <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
-              <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
-              <div className="flex flex-col leading-tight">
-                <span className="tabular-nums font-mono text-xs text-slate-900">
-                  <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-slate-400">Real</span>
-                  <span className="font-black">{formatUserDate(now, gmtOffset)} · {formatUserTime(now, gmtOffset)}</span>
-                  <span className="ml-1 text-slate-400 font-sans text-[10px]">({formatGmtLabel(gmtOffset)})</span>
-                </span>
-                {activeView === 'simulation' && simNowDate && (
-                  <span className="tabular-nums font-mono text-xs text-indigo-700 mt-0.5">
-                    <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-indigo-400">Sim</span>
-                    <span className="font-black">{formatUserDate(simNowDate, gmtOffset)} · {formatUserTime(simNowDate, gmtOffset)}</span>
-                    {session?.status === 'paused' && <span className="ml-1 text-amber-500 font-sans text-[10px] font-bold">(pausado)</span>}
+            {/* Relojes (C12–C16): momento real siempre; momento simulado solo en Simulación (Día a Día no lo muestra, corre en tiempo real).
+                Con sesión de simulación activa (en CUALQUIER pestaña — la simulación sigue corriendo en segundo plano
+                aunque estés viendo otra vista), los 4 tiempos (Real/Sim/T.Simulado/T.Real) se muestran en el reloj
+                flotante y movible sobre el mapa (ver <FloatingSimClock/> más abajo) en vez de aquí, para no duplicarlos.
+                Antes esto dependía de `activeView === 'simulation'`: al recargar la página siempre se vuelve a la
+                pestaña Dashboard por defecto, así que el reloj flotante "desaparecía" hasta volver a entrar a
+                Simulación manualmente — ahora solo depende de que haya sesión, así sobrevive la recarga. */}
+            {!session && (
+              <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
+                <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
+                <div className="flex flex-col leading-tight">
+                  <span className="tabular-nums font-mono text-xs text-slate-900">
+                    <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-slate-400">Real</span>
+                    <span className="font-black">{formatUserDate(now, gmtOffset)} · {formatUserTime(now, gmtOffset)}</span>
+                    <span className="ml-1 text-slate-400 font-sans text-[10px]">({formatGmtLabel(gmtOffset)})</span>
                   </span>
-                )}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* ── Métricas de operación diaria en el header (solo vista Dashboard) ── */}
             {activeView === 'dashboard' && (
@@ -287,9 +305,6 @@ function AppContent() {
                       <div className={cn('w-2 h-2 rounded-full shrink-0', simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
                       <span className="text-[9px] font-mono text-slate-400 hidden sm:block">{session.id.substring(0, 10)}…</span>
                     </div>
-                    <div className="h-7 w-px bg-slate-200 shrink-0" />
-                    <SimStat label="T. Simulado" value={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'} className="text-indigo-700" />
-                    <SimStat label="T. Real"     value={formatRealElapsed(elapsedRealMs)}                               className="text-emerald-700" />
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
                     <div className="flex gap-1 shrink-0">
                       <button
@@ -489,6 +504,23 @@ function AppContent() {
           >
             <DailyOperationsView />
           </div>
+
+          {/* Reloj flotante y movible: los 4 tiempos (Real/Sim/T.Simulado/T.Real)
+              solo mientras hay una sesión de simulación activa — en cualquier pestaña,
+              no solo Simulación (ver header, que oculta su propio bloque de reloj en
+              ese caso para no duplicarlo). */}
+          {session && (
+            <FloatingSimClock
+              realDate={formatUserDate(now, gmtOffset)}
+              realTime={formatUserTime(now, gmtOffset)}
+              gmtLabel={formatGmtLabel(gmtOffset)}
+              simDate={simNowDate ? formatUserDate(simNowDate, gmtOffset) : null}
+              simTime={simNowDate ? formatUserTime(simNowDate, gmtOffset) : null}
+              paused={session.status === 'paused'}
+              simElapsed={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
+              realElapsed={formatRealElapsed(elapsedRealMs)}
+            />
+          )}
 
           <AnimatePresence mode="wait">
             {activeView === 'orders'     && <OrderUploadView   key="orders"     />}
@@ -762,19 +794,6 @@ function KpiPill({ label, value, tone, dot, onClick }: {
         {label}
       </span>
       <span className={cn('text-[15px] font-black font-mono leading-tight', tone)}>{value}</span>
-    </div>
-  );
-}
-
-function SimStat({ label, value, className, onClick }: { label: string; value: React.ReactNode; className?: string; onClick?: () => void }) {
-  return (
-    <div
-      className={cn('flex flex-col leading-tight px-1 shrink-0', onClick && 'cursor-pointer rounded-md hover:bg-slate-100 transition-colors')}
-      onClick={onClick}
-      title={onClick ? 'Ver detalle de incumplimientos' : undefined}
-    >
-      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
-      <span className={cn('text-sm font-black font-mono leading-tight', className)}>{value}</span>
     </div>
   );
 }

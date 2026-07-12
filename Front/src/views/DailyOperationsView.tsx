@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, LayoutGrid, XCircle, FileText, Package,
+  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutGrid, XCircle, FileText, Package,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
@@ -15,6 +15,10 @@ import { simulationService } from '../services/simulationService';
 import { operationsSocket } from '../services/operationsService';
 import type { SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { cn } from '../lib/utils';
+import { useContainBoxSize } from '../hooks/useContainBoxSize';
+
+// Margen de arrastre disponible incluso al zoom mínimo (k=1) — ver comentario en `clamp`.
+const PAN_SLACK = 260;
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
@@ -108,6 +112,14 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   const [routeOverlay, setRouteOverlay] =
     useState<{ shipmentId: string; legs: ShipmentRouteLeg[] } | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
+  // Barra flotante de opciones (Leyenda/Alertas/Cancelar vuelos/Reporte) — ocultable con un botón.
+  // Se persiste en localStorage (misma clave que usa Simulación) para recordar cómo quedó entre recargas.
+  const [toolbarOpen, setToolbarOpen] = useState(
+    () => localStorage.getItem('map_toolbar_open') !== 'false'
+  );
+  useEffect(() => {
+    localStorage.setItem('map_toolbar_open', String(toolbarOpen));
+  }, [toolbarOpen]);
 
   // ── Rutas canceladas — parpadeo temporal en el mapa (D14/D15, LE-62) ──────
   // El avión ya lo quita OperationsProvider al recibir FLIGHT_CANCELLED; aquí
@@ -155,14 +167,26 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   // ── Zoom / Pan ─────────────────────────────────────────────────────────────
   const svgRef = useRef<SVGSVGElement>(null);
+  // Contenedor "letterbox": el SVG mantiene siempre la proporción real del
+  // viewBox (3:2) dentro de este contenedor, en vez de estirarse para llenarlo.
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapBoxSize = useContainBoxSize(mapContainerRef, MAP_VIEWBOX.width, MAP_VIEWBOX.height);
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, k: 1 });
   const isPanning = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
 
+  // PAN_SLACK da margen de arrastre incluso al zoom mínimo (k=1): sin esto, en k=1
+  // los límites colapsaban a exactamente 0 y el mapa quedaba imposible de mover con
+  // el mouse. El rect de océano se dibuja PAN_SLACK más grande que el viewBox para
+  // que ese margen nunca revele canvas en blanco.
   const clamp = useCallback((x: number, y: number, k: number) => {
     const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
     const ck = Math.max(1, Math.min(12, k));
-    return { x: Math.max(W * (1 - ck), Math.min(0, x)), y: Math.max(H * (1 - ck), Math.min(0, y)), k: ck };
+    return {
+      x: Math.max(W * (1 - ck) - PAN_SLACK, Math.min(PAN_SLACK, x)),
+      y: Math.max(H * (1 - ck) - PAN_SLACK, Math.min(PAN_SLACK, y)),
+      k: ck,
+    };
   }, []);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -383,10 +407,17 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     <div className="absolute inset-0 w-full h-full bg-slate-100">
 
       {/* ── MAPA ──────────────────────────────────────────────────────────── */}
+      {/* Contenedor letterbox: centra el SVG manteniendo siempre su proporción
+          real 3:2 — el mapa ya no se estira/deforma para llenar el hueco, solo
+          se escala uniformemente para aprovechar el máximo espacio posible. */}
+      <div ref={mapContainerRef} className="absolute inset-0 flex items-center justify-center overflow-hidden">
       <svg
         ref={svgRef}
-        className="w-full h-full"
-        style={{ cursor: isPanning.current ? 'grabbing' : 'grab' }}
+        style={{
+          cursor: isPanning.current ? 'grabbing' : 'grab',
+          width: mapBoxSize.width,
+          height: mapBoxSize.height,
+        }}
         viewBox={`0 0 ${MAP_VIEWBOX.width} ${MAP_VIEWBOX.height}`}
         preserveAspectRatio="none"
         onWheel={handleWheel}
@@ -407,8 +438,12 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         </defs>
 
         <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
-          {/* Océano */}
-          <rect x="0" y="0" width={MAP_VIEWBOX.width} height={MAP_VIEWBOX.height} fill="#a8cfe8" />
+          {/* Océano — más grande que el viewBox para cubrir el margen de PAN_SLACK */}
+          <rect
+            x={-PAN_SLACK} y={-PAN_SLACK}
+            width={MAP_VIEWBOX.width + 2 * PAN_SLACK} height={MAP_VIEWBOX.height + 2 * PAN_SLACK}
+            fill="#a8cfe8"
+          />
 
           {/* Países — todos sin filtrar */}
           {worldData && pathGenerator && (
@@ -722,6 +757,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           </g>
         </g>
       </svg>
+      </div>
 
       {/* ── TOOLTIP HUB ─────────────────────────────────────────────────────── */}
       <AnimatePresence>
@@ -859,6 +895,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
       {/* ── BOTÓN LEYENDA (inferior izquierda) ──────────────────────────────── */}
       <div className="absolute bottom-4 left-4 z-30 flex flex-col gap-2 items-start">
+        {toolbarOpen && (
+        <>
         <AnimatePresence>
           {legendOpen && (
             <motion.div key="pop-legend"
@@ -944,6 +982,16 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             <Package className="w-4 h-4" /> Última solución
           </button>
         )}
+        </>
+        )}
+        <button
+          onClick={() => setToolbarOpen(v => !v)}
+          className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-slate-500 border border-slate-200 hover:bg-slate-50"
+          title={toolbarOpen ? 'Ocultar opciones' : 'Mostrar opciones'}
+        >
+          {toolbarOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+          {!toolbarOpen && 'Opciones'}
+        </button>
       </div>
 
       {/* ── PANEL DE INFORMACIÓN (derecha): Aeropuertos · Vuelos ─────────────── */}
