@@ -2180,7 +2180,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
       <AnimatePresence>
         {cancelModalOpen && session?.id && (
-          <FlightCancelModal sessionId={session.id} simNowMs={currentSimMsVal} onClose={() => setCancelModalOpen(false)} />
+          <FlightCancelModal sessionId={session.id} onClose={() => setCancelModalOpen(false)} />
         )}
       </AnimatePresence>
 
