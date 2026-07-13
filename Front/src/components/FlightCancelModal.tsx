@@ -1,34 +1,21 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import { motion } from 'motion/react';
 import { XCircle, Search, Shuffle, AlertTriangle } from 'lucide-react';
 import { useMap } from '../providers/MapProvider';
 import { useToast } from '../providers/ToastProvider';
-import { simulationService, DisruptionResult, SimFlight } from '../services/simulationService';
+import { simulationService, DisruptionResult } from '../services/simulationService';
 import { cn } from '../lib/utils';
 
 // Modal de cancelación de vuelos (LE-70/LE-71): el operario elige horarios
 // (scheduleId sin fecha) manual o aleatoriamente y se inyectan como disrupciones.
-// Solo se listan vuelos CANCELABLES: instancias en vivo con estado SCHEDULED (aún no
-// parten) y cuya salida cae dentro de las próximas 24 h simuladas. Así no aparecen
-// vuelos ya cancelados, ya partidos ni fuera de la ventana operativa — el operario
-// solo ve lo que realmente puede cancelar. El backend resuelve la fecha (hoy si
-// faltan >1 h, mañana si no) y emite FLIGHT_CANCELLED por el WS (D14/D15).
+// El backend resuelve la fecha de cada ocurrencia (hoy si faltan >1h, mañana si no)
+// y emite FLIGHT_CANCELLED por el WS — el mapa las muestra parpadeando (D14/D15).
 interface FlightCancelModalProps {
   sessionId: string;
-  // Tiempo simulado actual (ms epoch). Define la ventana de 24 h. null si aún no llega.
-  simNowMs: number | null;
   onClose: () => void;
 }
 
-const WINDOW_MS = 24 * 60 * 60 * 1000; // próximas 24 h simuladas
-
-// scheduleId (sin fecha) a partir del flightId en vivo "SKBO-SEQM-19:01-20260712".
-// El idFlightEdge del backend es scheduleId + "-yyyyMMdd"; se quita ese sufijo.
-function scheduleIdOf(flightId: string): string {
-  return flightId.replace(/-\d{8}$/, '');
-}
-
-// Hora local "HH:mm" del horario, embebida en el scheduleId ("SKBO-SEQM-19:01").
+// Hora local "HH:mm" del horario, embebida en el scheduleId ("SKBO-SEQM-19:00")
 function depTimeOf(scheduleId: string): string {
   return scheduleId.split('-')[2] ?? '';
 }
@@ -37,8 +24,8 @@ function depTimeOf(scheduleId: string): string {
 // Se muestran los primeros N y la búsqueda refina el resto.
 const MAX_ROWS = 300;
 
-export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId, simNowMs, onClose }) => {
-  const { projectedHubs } = useMap();
+export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId, onClose }) => {
+  const { projectedFlights, projectedHubs } = useMap();
   const { addToast } = useToast();
 
   const [search, setSearch] = useState('');
@@ -46,17 +33,6 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
   const [randomCount, setRandomCount] = useState(5);
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState<DisruptionResult[] | null>(null);
-  const [flights, setFlights] = useState<SimFlight[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  // Carga los vuelos en vivo de la sesión al abrir el modal.
-  useEffect(() => {
-    const controller = new AbortController();
-    simulationService.getSimFlights(sessionId, controller.signal)
-      .then(setFlights)
-      .catch(e => { if (!controller.signal.aborted) setLoadError(e?.message ?? 'No se pudieron cargar los vuelos'); });
-    return () => controller.abort();
-  }, [sessionId]);
 
   const cityOf = useMemo(() => {
     const m = new Map<string, string>();
@@ -64,37 +40,17 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
     return m;
   }, [projectedHubs]);
 
-  // Vuelos cancelables: SCHEDULED (aún no parten ni cancelados) y con salida dentro de
-  // las próximas 24 h. Se deduplica por scheduleId conservando la instancia más próxima,
-  // para no mostrar dos filas que cancelarían el mismo vuelo resuelto por el backend.
-  const cancellable = useMemo(() => {
-    if (!flights) return [];
-    const bySchedule = new Map<string, { scheduleId: string; fromIcao: string; toIcao: string; depMs: number }>();
-    for (const f of flights) {
-      if (f.status !== 'SCHEDULED') continue;
-      const depMs = new Date(f.depTime).getTime();
-      if (!depMs) continue;
-      if (simNowMs != null && (depMs < simNowMs || depMs > simNowMs + WINDOW_MS)) continue;
-      const scheduleId = scheduleIdOf(f.flightId);
-      const prev = bySchedule.get(scheduleId);
-      if (!prev || depMs < prev.depMs) {
-        bySchedule.set(scheduleId, { scheduleId, fromIcao: f.fromIcao, toIcao: f.toIcao, depMs });
-      }
-    }
-    return [...bySchedule.values()].sort((a, b) => a.depMs - b.depMs);
-  }, [flights, simNowMs]);
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return cancellable;
-    return cancellable.filter(f =>
-      f.scheduleId.toLowerCase().includes(q) ||
-      f.fromIcao.toLowerCase().includes(q) ||
-      f.toIcao.toLowerCase().includes(q) ||
-      (cityOf.get(f.fromIcao) ?? '').toLowerCase().includes(q) ||
-      (cityOf.get(f.toIcao) ?? '').toLowerCase().includes(q)
+    if (!q) return projectedFlights;
+    return projectedFlights.filter(f =>
+      f.id.toLowerCase().includes(q) ||
+      f.originId.toLowerCase().includes(q) ||
+      f.destinationId.toLowerCase().includes(q) ||
+      (cityOf.get(f.originId) ?? '').toLowerCase().includes(q) ||
+      (cityOf.get(f.destinationId) ?? '').toLowerCase().includes(q)
     );
-  }, [cancellable, search, cityOf]);
+  }, [projectedFlights, search, cityOf]);
 
   const toggle = useCallback((id: string) => {
     setSelected(prev => {
@@ -113,7 +69,7 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
-    setSelected(new Set(pool.slice(0, n).map(f => f.scheduleId)));
+    setSelected(new Set(pool.slice(0, n).map(f => f.id)));
   }, [filtered, randomCount]);
 
   const confirm = useCallback(async () => {
@@ -199,8 +155,8 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
               <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
                 <p className="text-[10px] text-amber-700 leading-snug">
-                  Solo se muestran los vuelos que parten en las <b>próximas 24 h</b> y aún pueden
-                  cancelarse. Las maletas afectadas se replanifican automáticamente.
+                  Se cancela la salida de <b>hoy</b> si faltan más de 1 h simulada para su partida;
+                  si no, la de <b>mañana</b>. Las maletas afectadas se replanifican automáticamente.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -217,7 +173,7 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
                   <input
                     type="number"
                     min={1}
-                    max={Math.max(1, cancellable.length)}
+                    max={projectedFlights.length}
                     value={randomCount}
                     onChange={e => setRandomCount(parseInt(e.target.value, 10) || 1)}
                     className="w-14 bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-800 outline-none text-center focus:border-rose-300"
@@ -236,21 +192,13 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
 
             {/* ── Lista de horarios ─────────────────────────────────────────── */}
             <div className="flex-1 overflow-y-auto custom-scrollbar px-3 py-2 min-h-[200px]">
-              {loadError ? (
-                <p className="text-center text-xs text-rose-500 py-8">{loadError}</p>
-              ) : flights === null ? (
-                <p className="text-center text-xs text-slate-400 py-8">Cargando vuelos…</p>
-              ) : filtered.length === 0 ? (
-                <p className="text-center text-xs text-slate-400 py-8">
-                  {cancellable.length === 0
-                    ? 'No hay vuelos cancelables en las próximas 24 h.'
-                    : 'Sin horarios que coincidan con la búsqueda.'}
-                </p>
+              {filtered.length === 0 ? (
+                <p className="text-center text-xs text-slate-400 py-8">Sin horarios que coincidan con la búsqueda.</p>
               ) : filtered.slice(0, MAX_ROWS).map(f => {
-                const checked = selected.has(f.scheduleId);
+                const checked = selected.has(f.id);
                 return (
                   <label
-                    key={f.scheduleId}
+                    key={f.id}
                     className={cn(
                       'flex items-center gap-3 px-3 py-2 rounded-xl cursor-pointer transition-colors',
                       checked ? 'bg-rose-50 border border-rose-200' : 'hover:bg-slate-50 border border-transparent'
@@ -259,14 +207,14 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
                     <input
                       type="checkbox"
                       checked={checked}
-                      onChange={() => toggle(f.scheduleId)}
+                      onChange={() => toggle(f.id)}
                       className="accent-rose-600 shrink-0"
                     />
-                    <span className="text-[11px] font-mono font-bold text-slate-800 w-40 shrink-0">{f.scheduleId}</span>
+                    <span className="text-[11px] font-mono font-bold text-slate-800 w-40 shrink-0">{f.id}</span>
                     <span className="text-[10px] text-slate-500 font-semibold flex-1 truncate">
-                      {cityOf.get(f.fromIcao) ?? f.fromIcao} → {cityOf.get(f.toIcao) ?? f.toIcao}
+                      {cityOf.get(f.originId) ?? f.originId} → {cityOf.get(f.destinationId) ?? f.destinationId}
                     </span>
-                    <span className="text-[10px] font-mono text-slate-400 shrink-0">{depTimeOf(f.scheduleId)}</span>
+                    <span className="text-[10px] font-mono text-slate-400 shrink-0">{depTimeOf(f.id)}</span>
                   </label>
                 );
               })}
