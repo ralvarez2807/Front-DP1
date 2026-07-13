@@ -1,9 +1,9 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSocket } from './SocketProvider';
 import { useAuthContext } from './AuthProvider';
 import { useToast } from './ToastProvider';
 import { socketService } from '../services/socket';
-import { simulationService } from '../services/simulationService';
+import { simulationService, SimulationResult } from '../services/simulationService';
 import { SimulationSession, OperationalEvent, CriticalPoint } from '../models/operational';
 import { SCENARIOS, SimulationScenario } from '../constants/domain';
 import { localInputToUtcIso } from '../lib/timezone';
@@ -160,6 +160,11 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const clearRestoredFlights = useCallback(() => setRestoredFlights([]), []);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
   const [lastSimUpdate, setLastSimUpdate] = useState<{ simMs: number; realMs: number } | null>(null);
+  // Espejo del último tiempo simulado conocido, para leerlo desde el polling de
+  // respaldo (cuyo closure no se recrea en cada evento WS) al reconstruir el
+  // colapso vía GET /result.
+  const lastSimUpdateRef = useRef<{ simMs: number; realMs: number } | null>(null);
+  useEffect(() => { lastSimUpdateRef.current = lastSimUpdate; }, [lastSimUpdate]);
   const [completionReport, setCompletionReport] = useState<any | null>(null);
   const clearCompletionReport = useCallback(() => setCompletionReport(null), []);
   const [collapseResult, setCollapseResult] = useState<CollapseResult | null>(null);
@@ -382,8 +387,47 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const ACTIVE   = new Set(['starting', 'running', 'paused']);
     if (!session?.id || !ACTIVE.has(session.status)) return;
 
-    const sessionId = session.id;
-    const config    = session.config;
+    const sessionId     = session.id;
+    const config        = session.config;
+    const startTimeAtIso = session.startTimeAt;
+
+    // Limpieza local de la sesión (idéntica al cierre por WS).
+    const teardown = () => {
+      socketService.disconnect();
+      localStorage.removeItem('simulation_config');
+      clearStoredStartedAt();
+      setEvents([]);
+      setSessionStartedAt(null);
+      setLastSimUpdate(null);
+      setSession(null);
+    };
+
+    // Muestra el modal de colapso a partir del estado final. El WS COLLAPSE_DETECTED
+    // es el camino primario (trae simTime/baggageId exactos); esto lo reconstruye por
+    // si aquel evento no llegó a procesarse: el simTime se aproxima con el último
+    // tiempo simulado conocido y el motivo viene de GET /result.
+    const showCollapse = (collapseReason: string | null) => {
+      const scenario = config?.scenario ?? 'period_5d';
+      const simMs   = lastSimUpdateRef.current?.simMs
+        ?? (startTimeAtIso ? new Date(startTimeAtIso).getTime() : Date.now());
+      const startMs = startTimeAtIso ? new Date(startTimeAtIso).getTime() : simMs;
+      setCollapseResult({
+        sessionId,
+        simTime:           new Date(simMs).toISOString(),
+        reason:            collapseReason ?? 'Colapso operativo',
+        baggageId:         '',
+        deadline:          '',
+        consecutiveCycles: 0,
+        simElapsedMs:      Math.max(0, simMs - startMs),
+        realElapsedMs:     Date.now() - (sessionStartedAt ?? Date.now()),
+      });
+      simulationService.getSummaryReport(sessionId)
+        .then(report => {
+          setCollapseResult(prev => prev ? { ...prev, report } : prev);
+          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
+        })
+        .catch(() => saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report: null }));
+    };
 
     const poll = async () => {
       try {
@@ -392,9 +436,9 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         if (TERMINAL.has(updated.status)) {
           // Este polling de respaldo es el que de verdad detecta el fin de una
           // simulación (el evento SIM_STATUS por WS que se maneja más abajo no
-          // está confirmado en el backend — no aparece en la tabla de eventos
-          // de APIS.md). "collapsed" queda fuera: COLLAPSE_DETECTED ya pidió el
-          // reporte apenas se detectó, este polling solo es la red de seguridad.
+          // está confirmado en el backend — no aparece en la tabla de eventos de
+          // APIS.md). Cubre también el colapso: si la sesión aún reporta "collapsed"
+          // (ventana breve antes de que el backend la elimine) mostramos el modal.
           if (updated.status === 'completed' || updated.status === 'stopped') {
             const outcome: 'completed' | 'stopped' = updated.status;
             const scenario = config?.scenario ?? 'period_5d';
@@ -405,18 +449,17 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
               })
               .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
           }
-          socketService.disconnect();
-          localStorage.removeItem('simulation_config');
-          setSession(null);
-          setEvents([]);
-          addToast(
-            updated.status === 'completed'
-              ? 'Simulación completada'
-              : updated.status === 'collapsed'
-                ? 'La simulación colapsó'
-                : 'Simulación detenida externamente',
-            'info'
-          );
+          teardown();
+          if (updated.status === 'collapsed') {
+            simulationService.getResult(sessionId)
+              .then(r => showCollapse(r.collapseReason))
+              .catch(() => showCollapse(null));
+          } else {
+            addToast(
+              updated.status === 'completed' ? 'Simulación completada' : 'Simulación detenida externamente',
+              'info'
+            );
+          }
           return;
         }
 
@@ -429,11 +472,32 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           };
         });
       } catch (e: any) {
-        if (e?.statusCode === 404) {
-          socketService.disconnect();
-          localStorage.removeItem('simulation_config');
-          setSession(null);
-          setEvents([]);
+        if (e?.statusCode !== 404) return;
+
+        // 404 = la sesión ya no está en el registry porque TERMINÓ (el backend la
+        // elimina al finalizar/colapsar). Su estado final (incl. el flag de colapso)
+        // sigue disponible en GET /result durante ~5 min: lo consultamos para mostrar
+        // el reporte de colapso en vez del aviso genérico. Es la red de seguridad por
+        // si el evento WS COLLAPSE_DETECTED no llegó a procesarse antes del cierre.
+        let finalResult: SimulationResult | null = null;
+        try {
+          finalResult = await simulationService.getResult(sessionId);
+        } catch { /* /result también expiró o el id nunca existió */ }
+
+        teardown();
+
+        if (finalResult?.status === 'COLLAPSED') {
+          showCollapse(finalResult.collapseReason);
+        } else if (finalResult?.status === 'COMPLETED' || finalResult?.status === 'STOPPED') {
+          const outcome = finalResult.status.toLowerCase() as 'completed' | 'stopped';
+          const scenario = config?.scenario ?? 'period_5d';
+          simulationService.getSummaryReport(sessionId)
+            .then(report => {
+              setCompletionReport({ ...report, __outcome: outcome, __sessionId: sessionId });
+              saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
+            })
+            .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
+        } else {
           addToast('La sesión ya no existe en el servidor', 'warning');
         }
       }
