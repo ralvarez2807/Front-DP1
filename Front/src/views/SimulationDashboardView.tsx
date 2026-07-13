@@ -234,18 +234,23 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { setSimAirportList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
+    let id: ReturnType<typeof setInterval> | null = null;
 
     const fetchLoads = async () => {
       try {
         const airports = await simulationService.getSimAirports(sessionId);
         if (cancelled) return;
         setSimAirportList(airports);
-      } catch { /* silencioso */ }
+      } catch (e: any) {
+        // Sesión muerta (backend ya la liberó del registry): cortar el polling
+        // en vez de seguir pegándole a un 404 cada 8s indefinidamente.
+        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+      }
     };
 
     fetchLoads();
-    const id = setInterval(fetchLoads, 8_000);
-    return () => { cancelled = true; clearInterval(id); };
+    id = setInterval(fetchLoads, 8_000);
+    return () => { cancelled = true; if (id !== null) clearInterval(id); };
   }, [session?.id]);
 
   // ── Carga real de envíos/paquetes durante la simulación ───────────────────
@@ -253,18 +258,21 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { setSimShipmentList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
+    let id: ReturnType<typeof setInterval> | null = null;
 
     const fetchShipments = async () => {
       try {
         const shipments = await simulationService.getSimShipments(sessionId);
         if (cancelled) return;
         setSimShipmentList(shipments);
-      } catch { /* silencioso */ }
+      } catch (e: any) {
+        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+      }
     };
 
     fetchShipments();
-    const id = setInterval(fetchShipments, 10_000);
-    return () => { cancelled = true; clearInterval(id); };
+    id = setInterval(fetchShipments, 10_000);
+    return () => { cancelled = true; if (id !== null) clearInterval(id); };
   }, [session?.id]);
 
   // ── Cache de duraciones y depTimes reales de vuelo ──────────────────────────
@@ -292,6 +300,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { fetchFlightLoadsRef.current = null; setSimFlightList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
+    let id: ReturnType<typeof setInterval> | null = null;
 
     const fetchFlightLoads = async () => {
       try {
@@ -320,13 +329,15 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           const cachedDuration = flightDurationsRef.current.get(p.flightId);
           return { ...p, capacity: live.capacity, occupied: live.load, ...(cachedDuration ? { durationMs: cachedDuration } : {}) };
         }));
-      } catch { /* silencioso */ }
+      } catch (e: any) {
+        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+      }
     };
 
     fetchFlightLoadsRef.current = fetchFlightLoads;
     fetchFlightLoads();
-    const id = setInterval(fetchFlightLoads, 8_000);
-    return () => { cancelled = true; clearInterval(id); fetchFlightLoadsRef.current = null; };
+    id = setInterval(fetchFlightLoads, 8_000);
+    return () => { cancelled = true; if (id !== null) clearInterval(id); fetchFlightLoadsRef.current = null; };
   }, [session?.id]);
 
   // ── Rutas deduplicadas — clave canónica para que A→B y B→A usen la misma línea

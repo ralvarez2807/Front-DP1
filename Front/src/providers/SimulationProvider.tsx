@@ -439,6 +439,10 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       }
     };
 
+    // Llamada inmediata: sin esto, setInterval espera 4s para el primer chequeo,
+    // y si algo recrea este efecto antes de ese primer tick (p. ej. session?.status
+    // cambia por otra vía) el poll de respaldo podía no llegar a ejecutarse NUNCA.
+    poll();
     const id = setInterval(poll, 4_000);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
