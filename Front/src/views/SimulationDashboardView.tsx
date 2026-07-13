@@ -17,7 +17,6 @@ import { hubService } from '../services/hubService';
 import { simulationService, SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { FlightCancelModal } from '../components/FlightCancelModal';
-import { RunComparisonModal } from '../components/RunComparisonModal';
 import { ReportRows } from '../components/SummaryReportModal';
 import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
@@ -28,7 +27,7 @@ import { useUserTimezone } from '../hooks/useUserTimezone';
 import { useContainBoxSize } from '../hooks/useContainBoxSize';
 
 // Fallback de velocidad si el backend aún no respondió con su speedFactor real.
-const SIM_SPEED_FALLBACK = 80;
+const SIM_SPEED_FALLBACK = 120;
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
@@ -215,7 +214,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   // Popover de leyenda flotante en el mapa
   const [legendOpen, setLegendOpen] = useState(false);
-  // Barra flotante de opciones (Leyenda/Alertas/Cancelar vuelos/Comparar) — ocultable con un botón.
+  // Barra flotante de opciones (Leyenda/Alertas/Cancelar vuelos) — ocultable con un botón.
   // Se persiste en localStorage (misma clave que usa Día a Día) para recordar cómo quedó entre recargas.
   const [toolbarOpen, setToolbarOpen] = useState(
     () => localStorage.getItem('map_toolbar_open') !== 'false'
@@ -775,7 +774,6 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const [availableDays, setAvailableDays] = useState<string[]>([]);
   const [showCollapseWarning, setShowCollapseWarning] = useState(false);
   // Comparativa de ejecuciones (LE-76)
-  const [compareOpen, setCompareOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1905,7 +1903,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           )}
         </AnimatePresence>
 
-      {/* ── BOTONES FLOTANTES (Leyenda, Alertas, Cancelar vuelos, Comparar) ──
+      {/* ── BOTONES FLOTANTES (Leyenda, Alertas, Cancelar vuelos) ──
           Ahora en la esquina inferior DERECHA. Cuando el panel de detalle está
           abierto se corren a la izquierda del panel para no quedar tapados. */}
       <div
@@ -1987,13 +1985,6 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             <XCircle className="w-4 h-4" /> Cancelar vuelos
           </button>
         )}
-        <button
-          onClick={() => setCompareOpen(true)}
-          className="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg bg-white/90 backdrop-blur-md text-indigo-600 border border-indigo-200 hover:bg-indigo-50"
-          title="Comparar el desempeño de dos ejecuciones anteriores"
-        >
-          <LayoutGrid className="w-4 h-4" /> Comparar corridas
-        </button>
         </>
         )}
         <button
@@ -2178,12 +2169,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
       <AnimatePresence>
         {cancelModalOpen && session?.id && (
-          <FlightCancelModal sessionId={session.id} onClose={() => setCancelModalOpen(false)} />
+          <FlightCancelModal sessionId={session.id} simNowMs={currentSimMsVal} onClose={() => setCancelModalOpen(false)} />
         )}
       </AnimatePresence>
 
       {/* ── MODAL: Comparativa de ejecuciones (LE-76) ────────────────────────── */}
-      {compareOpen && <RunComparisonModal onClose={() => setCompareOpen(false)} />}
 
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 3px; }
