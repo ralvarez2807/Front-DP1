@@ -4,7 +4,7 @@ import {
   Map as MapIcon, Clock, AlertTriangle, CheckCircle, Package,
   ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, XCircle,
 } from 'lucide-react';
-import { Plane } from 'lucide-react';
+import { Plane, Crosshair, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useSimulationContext } from '../providers/SimulationProvider';
 import { useSocket } from '../providers/SocketProvider';
@@ -28,6 +28,14 @@ import { useContainBoxSize } from '../hooks/useContainBoxSize';
 
 // Fallback de velocidad si el backend aún no respondió con su speedFactor real.
 const SIM_SPEED_FALLBACK = 120;
+
+// Duración visual mínima de la animación de un avión (ms). El avión se elimina al
+// llegar FLIGHT_ARRIVED (hora de aterrizaje real = duraciónSim / speedFactor) con
+// 1.5 s de gracia; si el piso supera ese tiempo real, el avión se quita antes de
+// terminar el arco. Con speedFactor muy alto (modo colapso) el tiempo real del
+// vuelo es de pocos segundos, así que el piso debe ser ≤ la gracia de 1.5 s para
+// que el avión SIEMPRE complete el tramo en pantalla.
+const MIN_PLANE_ANIM_MS = 1_500;
 
 function LegendRow({ dot, label }: { dot: string; label: string }) {
   return (
@@ -198,9 +206,12 @@ function AnimatedPlane({
 interface SimulationDashboardViewProps {
   showConfig: boolean;
   onConfigClose: () => void;
+  /** Se llama al iniciar una nueva simulación (5d o colapso) para que App colapse
+   *  el panel de navegación izquierdo y se vea el mapa a pantalla completa. */
+  onSessionStart?: () => void;
 }
 
-export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose }) => {
+export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = ({ showConfig, onConfigClose, onSessionStart }) => {
   const { session, lastSimUpdate, events, createSession, startSimulation, pauseSimulation, resetSimulation, isLoading, restoredFlights, clearRestoredFlights, sessionStartedAt, completionReport, clearCompletionReport, dashboardMetrics } = useSimulationContext();
   const socket = useSocket();
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
@@ -315,7 +326,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           if (f.depTime && f.arrTime) {
             const depMs = new Date(f.depTime).getTime();
             const simMs = new Date(f.arrTime).getTime() - depMs;
-            const realMs = Math.max(15_000, Math.round(simMs / simSpeedRef.current));
+            const realMs = Math.max(MIN_PLANE_ANIM_MS, Math.round(simMs / simSpeedRef.current));
             flightDurationsRef.current.set(f.flightId, realMs);
             if (depMs) flightDepMsRef.current.set(f.flightId, depMs);
           }
@@ -358,9 +369,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     screenY: number;
   } | null>(null);
 
-  // ── Tooltip de avión ──────────────────────────────────────────────────────
+  // ── Panel flotante de avión (fijado al hacer click, sigue al avión) ───────
+  // Se guarda la KEY del avión (no un snapshot) para leer siempre su estado y
+  // posición actuales; screenX/Y se recalculan cada frame con un RAF mientras
+  // esté fijado. Se cierra al hacer click en el mapa o al aterrizar el avión.
   const [planeTooltip, setPlaneTooltip] = useState<{
-    plane: ActivePlane;
+    planeKey: string;
     screenX: number;
     screenY: number;
   } | null>(null);
@@ -517,12 +531,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const key = `${fid}-${fromIcao}-${toIcao}`;
 
       // Duración real: usar cache de depTime/arrTime del API si está disponible.
-      // Fallback: 2 sim-horas (90 s reales a speedFactor=80) — se corrige en el
-      // primer polling o cuando llega FLIGHT_ARRIVED.
+      // Fallback: 2 sim-horas — se corrige en el primer polling o al llegar
+      // FLIGHT_ARRIVED. El piso escala con el speedFactor (ver MIN_PLANE_ANIM_MS).
       const cachedDuration = flightDurationsRef.current.get(fid);
       const fallbackSimHours = payload.durationHours ?? payload.duration ?? 2;
       const durationMs = cachedDuration
-        ?? Math.max(15_000, Math.round(fallbackSimHours * 3_600_000 / simSpeedRef.current));
+        ?? Math.max(MIN_PLANE_ANIM_MS, Math.round(fallbackSimHours * 3_600_000 / simSpeedRef.current));
 
       console.debug(`[SimMap] FLIGHT_DEPARTED: ${fromIcao}→${toIcao} | cached=${!!cachedDuration} durationMs=${durationMs}`);
 
@@ -712,7 +726,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       if (!depMs || !simNow || depMs > simNow) return;
 
       const simFlightMs  = arrMs - depMs;
-      const durationMs   = Math.max(30_000, Math.round(simFlightMs / simSpeedRef.current));
+      const durationMs   = Math.max(MIN_PLANE_ANIM_MS, Math.round(simFlightMs / simSpeedRef.current));
       const simElapsedMs = Math.max(0, simNow - depMs);
       const startedAt    = animClock.now() - Math.round(simElapsedMs / simSpeedRef.current);
 
@@ -804,6 +818,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     return () => controller.abort();
   }, [gmtOffset]);
 
+  // Al iniciar una simulación: colapsa el panel izquierdo (via App) y despliega
+  // el panel derecho de información para dar el máximo de mapa + datos en vivo.
+  const focusOnSimulation = useCallback(() => {
+    onSessionStart?.();
+    setInfoPanelOpen(true);
+  }, [onSessionStart]);
+
   const handleCreate = useCallback(async () => {
     if (selectedScenario === SCENARIOS.COLLAPSE) {
       setShowCollapseWarning(true);
@@ -811,13 +832,15 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     }
     await createSession(selectedScenario, startDate, startTime, durationDays);
     onConfigClose();
-  }, [selectedScenario, startDate, startTime, durationDays, createSession, onConfigClose]);
+    focusOnSimulation();
+  }, [selectedScenario, startDate, startTime, durationDays, createSession, onConfigClose, focusOnSimulation]);
 
   const confirmCollapse = useCallback(async () => {
     setShowCollapseWarning(false);
     onConfigClose();
     await createSession(SCENARIOS.COLLAPSE, startDate, startTime);
-  }, [createSession, startDate, startTime, onConfigClose]);
+    focusOnSimulation();
+  }, [createSession, startDate, startTime, onConfigClose, focusOnSimulation]);
 
 
   // ── Auto-fit: centra el mapa en los aeropuertos cargados ─────────────────
@@ -1096,6 +1119,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   useEffect(() => { selectedFlightIdRef.current = selectedFlightId; }, [selectedFlightId]);
   const projectedHubsRef = useRef(projectedHubs);
   useEffect(() => { projectedHubsRef.current = projectedHubs; }, [projectedHubs]);
+  // Espejo del viewTransform para leerlo dentro del RAF que sigue al panel de avión.
+  const viewTransformRef = useRef(viewTransform);
+  useEffect(() => { viewTransformRef.current = viewTransform; }, [viewTransform]);
 
   useEffect(() => {
     if (!selectedFlightId) return;
@@ -1140,6 +1166,66 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     return () => cancelAnimationFrame(rafId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFlightId, clamp]);
+
+  // ── El panel flotante de avión sigue al avión (RAF) ──────────────────────
+  // Recalcula la posición en pantalla del panel fijado cada frame convirtiendo
+  // la posición Bézier (coords del mapa) → píxeles del contenedor. Si el avión
+  // ya no está en vuelo (aterrizó), cierra el panel.
+  useEffect(() => {
+    if (!planeTooltip?.planeKey) return;
+    const key = planeTooltip.planeKey;
+    let rafId: number;
+    const update = () => {
+      const plane = activePlanesRef.current.find(p => p.key === key);
+      if (!plane) { setPlaneTooltip(null); return; } // aterrizó → cerrar
+      const svg = svgRef.current;
+      const cont = mapContainerRef.current;
+      const origin = projectedHubsRef.current.find(h => h.id === plane.fromIcao);
+      const dest   = projectedHubsRef.current.find(h => h.id === plane.toIcao);
+      if (!svg || !cont || !origin || !dest) { rafId = requestAnimationFrame(update); return; }
+
+      // Misma curva de Bézier que AnimatedPlane
+      const t = Math.min(1, (animClock.now() - plane.startedAt) / plane.durationMs);
+      const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+      const cx = (origin.projectedX! + dest.projectedX!) / 2;
+      const cy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
+      const mt = 1 - t;
+      const px = mt*mt*origin.projectedX! + 2*mt*t*cx + t*t*dest.projectedX!;
+      const py = mt*mt*origin.projectedY! + 2*mt*t*cy + t*t*dest.projectedY!;
+
+      // Coords del mapa → píxeles del contenedor (viewBox escalado por preserveAspectRatio="none")
+      const svgRect  = svg.getBoundingClientRect();
+      const contRect = cont.getBoundingClientRect();
+      const vt = viewTransformRef.current;
+      const sx = svgRect.width  / MAP_VIEWBOX.width;
+      const sy = svgRect.height / MAP_VIEWBOX.height;
+      const screenX = (svgRect.left - contRect.left) + (vt.x + px * vt.k) * sx;
+      const screenY = (svgRect.top  - contRect.top)  + (vt.y + py * vt.k) * sy;
+      setPlaneTooltip(prev => prev && prev.planeKey === key ? { ...prev, screenX, screenY } : prev);
+      rafId = requestAnimationFrame(update);
+    };
+    rafId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(rafId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planeTooltip?.planeKey]);
+
+  // Envía el vuelo al panel derecho (pestaña Vuelos) y activa el rastreo con
+  // zoom (mismo comportamiento que seleccionar un vuelo). Usado por el botón del
+  // panel flotante del avión.
+  const sendPlaneToPanel = useCallback((plane: ActivePlane) => {
+    const sf = seenFlights.find(f => f.flightId === plane.flightId);
+    if (sf) {
+      selectFlight(sf);
+    } else {
+      setSelectedFlightId(plane.flightId);
+      setSelectedAirportId(null);
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+    }
+    setInfoPanelOpen(true);
+    setInfoPanelTab('flights');
+    setPlaneTooltip(null);
+  }, [seenFlights, selectFlight]);
 
   // ── Rutas e hubs con vuelo activo ────────────────────────────────────────
   const hubIndex = useMemo(() => new Map(projectedHubs.map(h => [h.id, h])), [projectedHubs]);
@@ -1204,6 +1290,89 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   // Si hay un vuelo seleccionado, atenuar más todo lo demás
   const INACTIVE_OPACITY = selectedFlightId ? 0.02 : (hasSession ? 0.04 : 0.08);
 
+  // ── Capas del mapa memoizadas (rendimiento) ───────────────────────────────
+  // La geometría de países es estática y su proyección (pathGenerator por feature)
+  // es cara: memoizarla evita recalcularla y re-diffear miles de paths en cada
+  // zoom/pan/frame de RAF. El grosor usa non-scaling-stroke para NO depender del
+  // zoom (antes `/viewTransform.k` cambiaba atributos en todos los paths al hacer
+  // zoom). Con esto, navegar el mapa solo cambia el `transform` del <g> contenedor.
+  const countriesLayer = useMemo(() => {
+    if (!worldData || !pathGenerator) return null;
+    return (
+      <g className="countries">
+        {worldData.features.map((feat: any, i: number) => (
+          <path
+            key={i}
+            d={pathGenerator(feat) || ''}
+            fill="#dde6ee"
+            stroke="#6b8299"
+            strokeWidth={1.2}
+            vectorEffect="non-scaling-stroke"
+            strokeLinejoin="round"
+          />
+        ))}
+      </g>
+    );
+  }, [worldData, pathGenerator]);
+
+  // Capa de rutas: solo se reconstruye al cambiar la selección o el conjunto de
+  // rutas activas, no en cada zoom/pan/frame. Trazos con non-scaling-stroke.
+  const routesLayer = useMemo(() => (
+    <g className="routes">
+      {uniqueRoutes.map(flight => {
+        const isActive = activeRoutePairSet.has(`${flight.originId}-${flight.destinationId}`) ||
+                         activeRoutePairSet.has(`${flight.destinationId}-${flight.originId}`);
+        const isSelected = selectedFlight
+          ? (flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
+            (flight.originId === selectedFlight.toIcao && flight.destinationId === selectedFlight.fromIcao)
+          : false;
+        const dimmed = selectedFlightId && !isSelected;
+
+        if (isSelected) {
+          return (
+            <path
+              key={flight.id}
+              d={flight.projectedPath}
+              stroke={selectedFlightIsCancelled ? '#dc2626' : '#f59e0b'}
+              strokeWidth={1.5}
+              vectorEffect="non-scaling-stroke"
+              fill="none"
+              opacity={0.95}
+              strokeDasharray={selectedFlightIsCancelled ? '6 4' : (!selectedFlightIsActive ? '4 4' : undefined)}
+            />
+          );
+        }
+        if (isActive) {
+          return (
+            <path
+              key={flight.id}
+              d={flight.projectedPath}
+              stroke="#ef4444"
+              strokeWidth={0.8}
+              vectorEffect="non-scaling-stroke"
+              fill="none"
+              strokeLinecap="round"
+              strokeDasharray="3 3"
+              opacity={dimmed ? 0.10 : 0.45}
+            />
+          );
+        }
+        return (
+          <path
+            key={flight.id}
+            d={flight.projectedPath}
+            stroke="#94a3b8"
+            strokeWidth={0.3}
+            vectorEffect="non-scaling-stroke"
+            fill="none"
+            strokeDasharray="2 6"
+            opacity={INACTIVE_OPACITY * 0.6}
+          />
+        );
+      })}
+    </g>
+  ), [uniqueRoutes, activeRoutePairSet, selectedFlight, selectedFlightId, selectedFlightIsCancelled, selectedFlightIsActive, INACTIVE_OPACITY]);
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -1217,7 +1386,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         ref={mapContainerRef}
         className="absolute inset-y-0 left-0 flex items-center justify-center overflow-hidden"
         style={{
-          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : 0,
+          right: infoPanelOpen ? 'calc(clamp(380px, 40%, 580px) + 16px)' : 0,
           transition: 'right 0.25s ease',
         }}
       >
@@ -1235,6 +1404,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onClick={() => setPlaneTooltip(null)}
       >
         <defs>
           <filter id="sim-glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -1255,77 +1425,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             fill="#a8cfe8"
           />
 
-          {/* Países */}
-          {worldData && pathGenerator && (
-            <g className="countries">
-              {worldData.features.map((feat: any, i: number) => (
-                <path
-                  key={i}
-                  d={pathGenerator(feat) || ''}
-                  fill="#dde6ee"
-                  stroke="#6b8299"
-                  strokeWidth={Math.max(0.5, 1.2 / viewTransform.k)}
-                  strokeLinejoin="round"
-                />
-              ))}
-            </g>
-          )}
+          {/* Países (capa memoizada) */}
+          {countriesLayer}
 
-          {/* Rutas de vuelo — una sola línea por par origen-destino */}
-          <g className="routes">
-            {uniqueRoutes.map(flight => {
-              // Verificar ambas direcciones (A→B y B→A)
-              const isActive = activeRoutePairSet.has(`${flight.originId}-${flight.destinationId}`) ||
-                               activeRoutePairSet.has(`${flight.destinationId}-${flight.originId}`);
-              const isSelected = selectedFlight
-                ? (flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
-                  (flight.originId === selectedFlight.toIcao && flight.destinationId === selectedFlight.fromIcao)
-                : false;
-              const dimmed = selectedFlightId && !isSelected;
-
-              if (isSelected) {
-                // Vuelo CANCELADO seleccionado → rojo (no el amarillo de "seleccionado").
-                return (
-                  <path
-                    key={flight.id}
-                    d={flight.projectedPath}
-                    stroke={selectedFlightIsCancelled ? '#dc2626' : '#f59e0b'}
-                    strokeWidth={1.5 / viewTransform.k}
-                    fill="none"
-                    opacity={0.95}
-                    strokeDasharray={selectedFlightIsCancelled
-                      ? `${6 / viewTransform.k} ${4 / viewTransform.k}`
-                      : (!selectedFlightIsActive ? `${4 / viewTransform.k} ${4 / viewTransform.k}` : undefined)}
-                  />
-                );
-              }
-              if (isActive) {
-                return (
-                  <path
-                    key={flight.id}
-                    d={flight.projectedPath}
-                    stroke="#ef4444"
-                    strokeWidth={0.8 / viewTransform.k}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeDasharray={`${3 / viewTransform.k} ${3 / viewTransform.k}`}
-                    opacity={dimmed ? 0.10 : 0.45}
-                  />
-                );
-              }
-              return (
-                <path
-                  key={flight.id}
-                  d={flight.projectedPath}
-                  stroke="#94a3b8"
-                  strokeWidth={0.3 / viewTransform.k}
-                  fill="none"
-                  strokeDasharray={`${2 / viewTransform.k} ${6 / viewTransform.k}`}
-                  opacity={INACTIVE_OPACITY * 0.6}
-                />
-              );
-            })}
-          </g>
+          {/* Rutas de vuelo (capa memoizada) — una sola línea por par origen-destino */}
+          {routesLayer}
 
           {/* Rutas canceladas — parpadeo temporal (D14/D15, LE-62) */}
           {cancelledRoutes.length > 0 && (
@@ -1445,28 +1549,17 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   key={plane.key}
                   opacity={isDimmed ? 0.2 : 1}
                   style={{ cursor: 'pointer' }}
-                  onMouseEnter={(e) => {
-                    const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTooltip({ plane, screenX: e.clientX - (containerRect?.left ?? 0), screenY: e.clientY - (containerRect?.top ?? 0) });
-                  }}
-                  onMouseMove={(e) => {
-                    if (!planeTooltip) return;
-                    const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTooltip(prev => prev ? { ...prev, screenX: e.clientX - (containerRect?.left ?? 0), screenY: e.clientY - (containerRect?.top ?? 0) } : null);
-                  }}
-                  onMouseLeave={() => setPlaneTooltip(null)}
-                  onClick={() => {
-                    const sf = seenFlights.find(f => f.flightId === plane.flightId);
-                    if (sf) {
-                      focusOnFlight(sf);
-                    } else {
-                      setSelectedFlightId(prev => prev === plane.flightId ? null : plane.flightId);
-                      setSelectedAirportId(null);
-                      setSelectedShipmentId(null);
-                      setRouteOverlay(null);
-                    }
-                    setInfoPanelOpen(true);
-                    setInfoPanelTab('flights');
+                  onClick={(e) => {
+                    // Fija/quita el panel flotante del avión (ya no es hover: el
+                    // avión se mueve). stopPropagation evita que el click del SVG
+                    // (que cierra el panel) lo cierre de inmediato.
+                    e.stopPropagation();
+                    const containerRect = mapContainerRef.current?.getBoundingClientRect();
+                    setPlaneTooltip(prev => prev?.planeKey === plane.key ? null : {
+                      planeKey: plane.key,
+                      screenX: e.clientX - (containerRect?.left ?? 0),
+                      screenY: e.clientY - (containerRect?.top ?? 0),
+                    });
                   }}
                 >
                   <AnimatedPlane
@@ -1694,7 +1787,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       {/* ── TOOLTIP AVIÓN ───────────────────────────────────────────────────── */}
       <AnimatePresence>
         {planeTooltip && (() => {
-          const p = planeTooltip.plane;
+          const p = activePlanes.find(pl => pl.key === planeTooltip.planeKey);
+          if (!p) return null;
           const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
           const loadColor = p.capacity === 0 ? '#2563eb'
             : pct >= 90 ? '#ef4444'
@@ -1713,20 +1807,28 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.92 }}
               transition={{ duration: 0.12 }}
-              className="absolute z-50 pointer-events-none"
+              className="absolute z-50 pointer-events-auto"
+              onClick={(e) => e.stopPropagation()}
               style={{
                 left: flipX ? planeTooltip.screenX - 4 : planeTooltip.screenX + 14,
                 top:  flipY ? planeTooltip.screenY - 4 : planeTooltip.screenY + 14,
                 transform: `${flipX ? 'translateX(-100%)' : ''} ${flipY ? 'translateY(-100%)' : ''}`,
               }}
             >
-              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[200px]">
+              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[210px]">
                 <div className="flex items-center gap-2 mb-2.5">
                   <Plane className="w-4 h-4 shrink-0" style={{ color: loadColor }} />
-                  <div>
-                    <p className="text-[12px] font-black text-slate-900 leading-tight">{p.flightId}</p>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12px] font-black text-slate-900 leading-tight truncate">{p.flightId}</p>
                     <p className="text-[9px] font-bold text-slate-400 font-mono uppercase tracking-widest">En vuelo</p>
                   </div>
+                  <button
+                    onClick={() => setPlaneTooltip(null)}
+                    title="Cerrar"
+                    className="shrink-0 -mr-1 -mt-1 p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
                 <div className="space-y-1 text-[10px]">
                   <div className="flex justify-between">
@@ -1758,6 +1860,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                     </div>
                   </div>
                 )}
+                <button
+                  onClick={() => sendPlaneToPanel(p)}
+                  className="mt-3 w-full flex items-center justify-center gap-1.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-colors shadow-lg shadow-indigo-600/20"
+                  title="Ver el detalle en el panel derecho y rastrear el avión"
+                >
+                  <Crosshair className="w-3.5 h-3.5" /> Ver en panel y rastrear
+                </button>
               </div>
             </motion.div>
           );
@@ -1920,7 +2029,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       <div
         className="absolute bottom-4 z-30 flex flex-col gap-2 items-end"
         style={{
-          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : '16px',
+          right: infoPanelOpen ? 'calc(clamp(380px, 40%, 580px) + 16px)' : '16px',
           transition: 'right 0.25s ease',
         }}
       >
@@ -2017,7 +2126,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 40, opacity: 0 }}
             transition={{ type: 'spring', stiffness: 320, damping: 34 }}
-            className="absolute top-4 right-4 bottom-4 z-30 w-[46%] min-w-[400px] max-w-[640px] flex flex-col"
+            className="absolute top-4 right-2 bottom-4 z-30 w-[40%] min-w-[380px] max-w-[580px] flex flex-col"
           >
             {/* Botón para colapsar el panel */}
             <button

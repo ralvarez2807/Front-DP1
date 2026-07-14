@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutGrid, XCircle, FileText, Package,
+  Map as MapIcon, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutGrid, XCircle, FileText, Package, Crosshair, X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
@@ -161,8 +161,10 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   const [hubTooltip, setHubTooltip] = useState<{
     hub: typeof projectedHubs[0]; screenX: number; screenY: number;
   } | null>(null);
+  // Panel flotante del avión: se fija al hacer click (ya no hover) y sigue al
+  // avión (RAF). Guarda la KEY para leer siempre su estado/posición actuales.
   const [planeTooltip, setPlaneTooltip] = useState<{
-    plane: OpsPlane; screenX: number; screenY: number;
+    planeKey: string; screenX: number; screenY: number;
   } | null>(null);
 
   // ── Zoom / Pan ─────────────────────────────────────────────────────────────
@@ -233,16 +235,19 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   // ── Zoom hacia hub seleccionado ───────────────────────────────────────────
   const focusOnAirport = useCallback((icao: string) => {
-    setSelectedAirportId(prev => prev === icao ? null : icao);
+    const isDeselect = selectedAirportId === icao;
+    setSelectedAirportId(isDeselect ? null : icao);
     // Selección directa de aeropuerto: deja de tener sentido cualquier envío fijado.
     setSelectedShipmentId(null);
     setRouteOverlay(null);
+    // Al deseleccionar (2º click en el mismo aeropuerto) volver a la vista base — igual que 5d.
+    if (isDeselect) { resetZoom(); return; }
     const hub = projectedHubs.find(h => h.id === icao);
     if (!hub) return;
     const targetK = 5;
     const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
     setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
-  }, [projectedHubs, clamp]);
+  }, [selectedAirportId, projectedHubs, clamp, resetZoom]);
 
   // Selecciona un vuelo sin togglear — usada por focusOnPlane y por la selección de
   // envíos "en vuelo" (que siempre debe seleccionar, nunca deseleccionar por rebote
@@ -265,13 +270,73 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       setSelectedFlightId(null);
       setSelectedShipmentId(null);
       setRouteOverlay(null);
+      resetZoom();   // deseleccionar → volver a la vista base (igual que 5d)
       return;
     }
     setSelectedShipmentId(null);
     setRouteOverlay(null);
     setInfoPanelTab('flights');
     selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
-  }, [selectedFlightId, selectPlaneFlight]);
+  }, [selectedFlightId, selectPlaneFlight, resetZoom]);
+
+  // ── Panel flotante del avión: sigue al avión (RAF) ────────────────────────
+  // Refs espejo para leer dentro del RAF sin closures obsoletos.
+  const planesRef = useRef(planes);
+  useEffect(() => { planesRef.current = planes; }, [planes]);
+  const projectedHubsRef = useRef(projectedHubs);
+  useEffect(() => { projectedHubsRef.current = projectedHubs; }, [projectedHubs]);
+  const viewTransformRef = useRef(viewTransform);
+  useEffect(() => { viewTransformRef.current = viewTransform; }, [viewTransform]);
+
+  // Recalcula la posición en pantalla del panel fijado cada frame (coords del mapa
+  // → píxeles del contenedor). Cierra el panel si el avión aterriza.
+  useEffect(() => {
+    if (!planeTooltip?.planeKey) return;
+    const key = planeTooltip.planeKey;
+    let rafId: number;
+    const update = () => {
+      const plane = planesRef.current.find(p => p.key === key);
+      if (!plane) { setPlaneTooltip(null); return; } // aterrizó → cerrar
+      const svg = svgRef.current;
+      const cont = mapContainerRef.current;
+      const origin = projectedHubsRef.current.find(h => h.id === plane.fromIcao);
+      const dest   = projectedHubsRef.current.find(h => h.id === plane.toIcao);
+      if (!svg || !cont || !origin || !dest) { rafId = requestAnimationFrame(update); return; }
+
+      // Misma curva de Bézier que AnimatedPlane
+      const t = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+      const dist = Math.sqrt((dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2);
+      const cx = (origin.projectedX! + dest.projectedX!) / 2;
+      const cy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
+      const mt = 1 - t;
+      const px = mt*mt*origin.projectedX! + 2*mt*t*cx + t*t*dest.projectedX!;
+      const py = mt*mt*origin.projectedY! + 2*mt*t*cy + t*t*dest.projectedY!;
+
+      const svgRect  = svg.getBoundingClientRect();
+      const contRect = cont.getBoundingClientRect();
+      const vt = viewTransformRef.current;
+      const sx = svgRect.width  / MAP_VIEWBOX.width;
+      const sy = svgRect.height / MAP_VIEWBOX.height;
+      const screenX = (svgRect.left - contRect.left) + (vt.x + px * vt.k) * sx;
+      const screenY = (svgRect.top  - contRect.top)  + (vt.y + py * vt.k) * sy;
+      setPlaneTooltip(prev => prev && prev.planeKey === key ? { ...prev, screenX, screenY } : prev);
+      rafId = requestAnimationFrame(update);
+    };
+    rafId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(rafId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planeTooltip?.planeKey]);
+
+  // Botón del panel flotante: envía el vuelo al panel derecho (Vuelos), lo rastrea
+  // con zoom y cierra el panel flotante.
+  const sendPlaneToPanel = useCallback((plane: OpsPlane) => {
+    setSelectedShipmentId(null);
+    setRouteOverlay(null);
+    setInfoPanelTab('flights');
+    setInfoPanelOpen(true);
+    selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
+    setPlaneTooltip(null);
+  }, [selectPlaneFlight]);
 
   // ── Rutas deduplicadas ─────────────────────────────────────────────────────
   const uniqueRoutes = useMemo(() => {
@@ -301,6 +366,30 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   const INACTIVE_OPACITY = selectedFlightId || selectedAirportId ? 0.04 : 0.08;
 
+  // ── Capas del mapa memoizadas (rendimiento) ───────────────────────────────
+  // La proyección de países (pathGenerator por feature) es cara y estática:
+  // memoizarla evita recalcularla y re-diffear miles de paths en cada zoom/pan/
+  // frame. non-scaling-stroke desacopla el grosor del zoom (antes `/viewTransform.k`
+  // cambiaba atributos en todos los paths). Ver SimulationDashboardView (mismo patrón).
+  const countriesLayer = useMemo(() => {
+    if (!worldData || !pathGenerator) return null;
+    return (
+      <g className="countries">
+        {worldData.features.map((feature: any, i: number) => (
+          <path
+            key={i}
+            d={pathGenerator(feature) || ''}
+            fill="#dde6ee"
+            stroke="#6b8299"
+            strokeWidth={1.2}
+            vectorEffect="non-scaling-stroke"
+            strokeLinejoin="round"
+          />
+        ))}
+      </g>
+    );
+  }, [worldData, pathGenerator]);
+
   // ── Datos convertidos para SimulationInfoPanel ────────────────────────────
   const opsAirportList = useMemo((): SimAirport[] =>
     Array.from(airports.values()).map(toSimAirport),
@@ -325,6 +414,62 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   // Todos los flightIds de planes son "activos" (están en el mapa)
   const activeFlightIds = useMemo(() => new Set(planes.map(p => p.flightId)), [planes]);
+
+  // Capa de rutas memoizada: solo se reconstruye al cambiar selección/rutas activas,
+  // no en cada zoom/pan/frame. Trazos con non-scaling-stroke (ver countriesLayer).
+  const routesLayer = useMemo(() => (
+    <g className="routes">
+      {uniqueRoutes.map(flight => {
+        const isActive = activeRoutePairs.has(`${flight.originId}-${flight.destinationId}`) ||
+                         activeRoutePairs.has(`${flight.destinationId}-${flight.originId}`);
+        const isSelected = selectedFlight &&
+          ((flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
+           (flight.originId === selectedFlight.toIcao   && flight.destinationId === selectedFlight.fromIcao));
+
+        if (isSelected) {
+          return (
+            <path
+              key={flight.id}
+              d={flight.projectedPath}
+              stroke="#f59e0b"
+              strokeWidth={1.5}
+              vectorEffect="non-scaling-stroke"
+              fill="none"
+              opacity={0.95}
+            />
+          );
+        }
+        if (isActive) {
+          const dimmed = !!(selectedFlightId || selectedAirportId) && !isSelected;
+          return (
+            <path
+              key={flight.id}
+              d={flight.projectedPath}
+              stroke="#ef4444"
+              strokeWidth={0.8}
+              vectorEffect="non-scaling-stroke"
+              fill="none"
+              strokeLinecap="round"
+              strokeDasharray="3 3"
+              opacity={dimmed ? 0.10 : 0.45}
+            />
+          );
+        }
+        return (
+          <path
+            key={flight.id}
+            d={flight.projectedPath}
+            stroke="#94a3b8"
+            strokeWidth={0.3}
+            vectorEffect="non-scaling-stroke"
+            fill="none"
+            strokeDasharray="2 6"
+            opacity={INACTIVE_OPACITY * 0.6}
+          />
+        );
+      })}
+    </g>
+  ), [uniqueRoutes, activeRoutePairs, selectedFlight, selectedFlightId, selectedAirportId, INACTIVE_OPACITY]);
 
   // Color de hub por ocupación
   const hubColor = (pct: number, empty: boolean) =>
@@ -366,6 +511,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       setSelectedShipmentId(null);
       setRouteOverlay(null);
       setSelectedFlightId(null);
+      resetZoom();   // deseleccionar → volver a la vista base (igual que 5d)
       return;
     }
     try {
@@ -401,7 +547,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       setSelectedFlightId(null);
       fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
     } catch { /* silencioso */ }
-  }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs]);
+  }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs, resetZoom]);
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -417,7 +563,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           // Igual que en SimulationDashboardView: el contenedor se encoge hasta el
           // borde del panel derecho cuando está abierto (no lo tapa); al cerrarlo
           // vuelve a ocupar todo el ancho. El letterbox reajusta el mapa al área.
-          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : 0,
+          right: infoPanelOpen ? 'calc(clamp(380px, 40%, 580px) + 16px)' : 0,
           transition: 'right 0.25s ease',
         }}
       >
@@ -435,6 +581,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onClick={() => setPlaneTooltip(null)}
       >
         <defs>
           <filter id="ops-glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -455,71 +602,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             fill="#a8cfe8"
           />
 
-          {/* Países — todos sin filtrar */}
-          {worldData && pathGenerator && (
-            <g className="countries">
-              {worldData.features.map((feature: any, i: number) => (
-                <path
-                  key={i}
-                  d={pathGenerator(feature) || ''}
-                  fill="#dde6ee"
-                  stroke="#6b8299"
-                  strokeWidth={Math.max(0.5, 1.2 / viewTransform.k)}
-                  strokeLinejoin="round"
-                />
-              ))}
-            </g>
-          )}
+          {/* Países (capa memoizada) */}
+          {countriesLayer}
 
-          {/* Rutas */}
-          <g className="routes">
-            {uniqueRoutes.map(flight => {
-              const isActive = activeRoutePairs.has(`${flight.originId}-${flight.destinationId}`) ||
-                               activeRoutePairs.has(`${flight.destinationId}-${flight.originId}`);
-              const isSelected = selectedFlight &&
-                ((flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
-                 (flight.originId === selectedFlight.toIcao   && flight.destinationId === selectedFlight.fromIcao));
-
-              if (isSelected) {
-                return (
-                  <path
-                    key={flight.id}
-                    d={flight.projectedPath}
-                    stroke="#f59e0b"
-                    strokeWidth={1.5 / viewTransform.k}
-                    fill="none"
-                    opacity={0.95}
-                  />
-                );
-              }
-              if (isActive) {
-                const dimmed = !!(selectedFlightId || selectedAirportId) && !isSelected;
-                return (
-                  <path
-                    key={flight.id}
-                    d={flight.projectedPath}
-                    stroke="#ef4444"
-                    strokeWidth={0.8 / viewTransform.k}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeDasharray={`${3 / viewTransform.k} ${3 / viewTransform.k}`}
-                    opacity={dimmed ? 0.10 : 0.45}
-                  />
-                );
-              }
-              return (
-                <path
-                  key={flight.id}
-                  d={flight.projectedPath}
-                  stroke="#94a3b8"
-                  strokeWidth={0.3 / viewTransform.k}
-                  fill="none"
-                  strokeDasharray={`${2 / viewTransform.k} ${6 / viewTransform.k}`}
-                  opacity={INACTIVE_OPACITY * 0.6}
-                />
-              );
-            })}
-          </g>
+          {/* Rutas (capa memoizada) */}
+          {routesLayer}
 
           {/* Rutas canceladas — parpadeo temporal (D14/D15, LE-62) */}
           {cancelledRoutes.length > 0 && (
@@ -636,17 +723,17 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                   key={plane.key}
                   opacity={isDimmed ? 0.2 : 1}
                   style={{ cursor: 'pointer' }}
-                  onClick={() => focusOnPlane(plane)}
-                  onMouseEnter={(e) => {
-                    const r = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTooltip({ plane, screenX: e.clientX - (r?.left ?? 0), screenY: e.clientY - (r?.top ?? 0) });
+                  onClick={(e) => {
+                    // Fija/quita el panel flotante del avión (ya no es hover: el
+                    // avión se mueve). stopPropagation evita que el click del SVG lo cierre.
+                    e.stopPropagation();
+                    const r = mapContainerRef.current?.getBoundingClientRect();
+                    setPlaneTooltip(prev => prev?.planeKey === plane.key ? null : {
+                      planeKey: plane.key,
+                      screenX: e.clientX - (r?.left ?? 0),
+                      screenY: e.clientY - (r?.top ?? 0),
+                    });
                   }}
-                  onMouseMove={(e) => {
-                    if (!planeTooltip) return;
-                    const r = svgRef.current?.parentElement?.getBoundingClientRect();
-                    setPlaneTooltip(prev => prev ? { ...prev, screenX: e.clientX - (r?.left ?? 0), screenY: e.clientY - (r?.top ?? 0) } : null);
-                  }}
-                  onMouseLeave={() => setPlaneTooltip(null)}
                 >
                   <AnimatedPlane
                     x1={origin.projectedX!} y1={origin.projectedY!}
@@ -837,7 +924,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       {/* ── TOOLTIP AVIÓN ───────────────────────────────────────────────────── */}
       <AnimatePresence>
         {planeTooltip && (() => {
-          const p = planeTooltip.plane;
+          const p = planes.find(pl => pl.key === planeTooltip.planeKey);
+          if (!p) return null;
           const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
           const loadColor = p.capacity === 0 ? '#2563eb' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
           const loadLabel = p.capacity === 0 ? 'Sin datos' : pct >= 90 ? 'Capacidad crítica' : pct >= 70 ? 'Casi lleno' : 'Normal';
@@ -847,20 +935,28 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             <motion.div key="plane-tip"
               initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.92 }}
               transition={{ duration: 0.12 }}
-              className="absolute z-50 pointer-events-none"
+              className="absolute z-50 pointer-events-auto"
+              onClick={(e) => e.stopPropagation()}
               style={{
                 left: flipX ? planeTooltip.screenX - 4 : planeTooltip.screenX + 14,
                 top:  flipY ? planeTooltip.screenY - 4 : planeTooltip.screenY + 14,
                 transform: `${flipX ? 'translateX(-100%)' : ''} ${flipY ? 'translateY(-100%)' : ''}`,
               }}
             >
-              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[200px]">
+              <div className="bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl px-4 py-3 min-w-[210px]">
                 <div className="flex items-center gap-2 mb-2.5">
                   <div className="w-4 h-4 shrink-0" style={{ color: loadColor }}>✈</div>
-                  <div>
-                    <p className="text-[12px] font-black text-slate-900 leading-tight">{p.flightId}</p>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12px] font-black text-slate-900 leading-tight truncate">{p.flightId}</p>
                     <p className="text-[9px] font-bold text-slate-400 font-mono uppercase tracking-widest">En vuelo</p>
                   </div>
+                  <button
+                    onClick={() => setPlaneTooltip(null)}
+                    title="Cerrar"
+                    className="shrink-0 -mr-1 -mt-1 p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
                 <div className="space-y-1 text-[10px]">
                   <div className="flex justify-between"><span className="text-slate-500 font-semibold">Origen</span><span className="font-black text-slate-800 font-mono">{p.fromIcao}</span></div>
@@ -881,6 +977,13 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                     </div>
                   </div>
                 )}
+                <button
+                  onClick={() => sendPlaneToPanel(p)}
+                  className="mt-3 w-full flex items-center justify-center gap-1.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-colors shadow-lg shadow-indigo-600/20"
+                  title="Ver el detalle en el panel derecho y rastrear el avión"
+                >
+                  <Crosshair className="w-3.5 h-3.5" /> Ver en panel y rastrear
+                </button>
               </div>
             </motion.div>
           );
@@ -909,7 +1012,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       <div
         className="absolute bottom-4 z-30 flex flex-col gap-2 items-end"
         style={{
-          right: infoPanelOpen ? 'calc(clamp(400px, 46%, 640px) + 24px)' : '16px',
+          right: infoPanelOpen ? 'calc(clamp(380px, 40%, 580px) + 16px)' : '16px',
           transition: 'right 0.25s ease',
         }}
       >
@@ -1021,7 +1124,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 40, opacity: 0 }}
             transition={{ type: 'spring', stiffness: 320, damping: 34 }}
-            className="absolute top-4 right-4 bottom-4 z-30 w-[46%] min-w-[400px] max-w-[640px] flex flex-col"
+            className="absolute top-4 right-2 bottom-4 z-30 w-[40%] min-w-[380px] max-w-[580px] flex flex-col"
           >
             <button
               onClick={() => setInfoPanelOpen(false)}

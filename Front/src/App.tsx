@@ -489,6 +489,7 @@ function AppContent() {
             <SimulationDashboardView
               showConfig={simConfigOpen}
               onConfigClose={() => setSimConfigOpen(false)}
+              onSessionStart={() => setSidebarCollapsed(true)}
             />
           </div>
 
@@ -520,6 +521,7 @@ function AppContent() {
               simElapsed={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
               realElapsed={formatRealElapsed(elapsedRealMs)}
               autoCollapse={activeView !== 'simulation'}
+              sidebarExpanded={!sidebarCollapsed}
             />
           )}
 
