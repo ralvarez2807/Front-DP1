@@ -588,10 +588,6 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             <feGaussianBlur stdDeviation="2" result="blur" />
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
-          <filter id="ops-plane-glow" x="-100%" y="-100%" width="300%" height="300%">
-            <feGaussianBlur stdDeviation="2" result="blur" />
-            <feComposite in="SourceGraphic" in2="blur" operator="over" />
-          </filter>
         </defs>
 
         <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
@@ -711,7 +707,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           )}
 
           {/* Aviones en vivo */}
-          <g className="planes" filter="url(#ops-plane-glow)">
+          <g className="planes">
             {planes.map(plane => {
               const origin = hubIndex.get(plane.fromIcao);
               const dest   = hubIndex.get(plane.toIcao);
@@ -1181,7 +1177,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
       <AnimatePresence>
         {cancelModalOpen && ops?.id && (
-          <FlightCancelModal sessionId={ops.id} onClose={() => setCancelModalOpen(false)} />
+          <FlightCancelModal sessionId={ops.id} onClose={() => setCancelModalOpen(false)} simNowMs={lastSimUpdate?.simMs ?? null} />
         )}
       </AnimatePresence>
 

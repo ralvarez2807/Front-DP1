@@ -107,12 +107,14 @@ function getPlaneColor(occupied: number, capacity: number, highlighted: boolean)
   // Violeta para "seleccionado": el dorado/ámbar ya lo usa el estado "en alerta"
   // (70-90% de carga) y con varios aviones ámbar en pantalla se confundían.
   if (highlighted) return '#8b5cf6';
-  if (capacity === 0) return '#2563eb';
+  if (capacity === 0) return '#2563eb';        // sin dato de capacidad
+  if (occupied <= 0) return '#94a3b8';         // plomo: el avión viaja vacío
   const pct = (occupied / capacity) * 100;
+  // Umbrales alineados con la ocupación del resto de la UI (occColor: 85/60).
   // Rojo más oscuro que el de rutas/hubs (#ef4444): a este tamaño de ícono, el
   // mismo tono se perdía contra las líneas de ruta activas del mismo color.
-  if (pct >= 90) return '#b91c1c';
-  if (pct >= 70) return '#f59e0b';
+  if (pct >= 85) return '#b91c1c';
+  if (pct >= 60) return '#f59e0b';
   return '#10b981';
 }
 
@@ -195,9 +197,6 @@ function AnimatedPlane({
       <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill={color} />
       {/* Cola */}
       <path d="M-1.5,5 L-5,8 L-4,9 L-1.5,7 L1.5,7 L4,9 L5,8 L1.5,5 Z" fill={color} />
-      {/* Borde oscuro para contraste — antes blanco, se perdía contra el mar y tierra claros */}
-      <ellipse cx="0" cy="0" rx="1.8" ry="7" fill="none" stroke="#1e293b" strokeWidth="0.6" />
-      <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill="none" stroke="#1e293b" strokeWidth="0.5" />
     </g>
   );
 }
@@ -1411,10 +1410,6 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             <feGaussianBlur stdDeviation="2" result="blur" />
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
           </filter>
-          <filter id="plane-glow" x="-100%" y="-100%" width="300%" height="300%">
-            <feGaussianBlur stdDeviation="2" result="blur" />
-            <feComposite in="SourceGraphic" in2="blur" operator="over" />
-          </filter>
         </defs>
 
         <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
@@ -1537,7 +1532,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           )}
 
           {/* Aviones animados */}
-          <g className="planes" filter="url(#plane-glow)">
+          <g className="planes">
             {activePlanes.map(plane => {
               const origin = hubIndex.get(plane.fromIcao);
               const dest   = hubIndex.get(plane.toIcao);
@@ -2289,7 +2284,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       {/* ── MODAL: Cancelar vuelos (LE-70/LE-71) ─────────────────────────────── */}
       <AnimatePresence>
         {cancelModalOpen && session?.id && (
-          <FlightCancelModal sessionId={session.id} onClose={() => setCancelModalOpen(false)} />
+          <FlightCancelModal sessionId={session.id} onClose={() => setCancelModalOpen(false)} simNowMs={currentSimMsVal} />
         )}
       </AnimatePresence>
 

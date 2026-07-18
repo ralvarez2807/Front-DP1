@@ -19,7 +19,7 @@ import { FloatingSimClock } from './components/FloatingSimClock';
 import { getStorageStatus } from './lib/simulation-utils';
 import { cn } from './lib/utils';
 import { formatUserDate, formatUserTime, formatUserDayTime, formatGmtLabel } from './lib/timezone';
-import { useUserTimezone } from './hooks/useUserTimezone';
+import { useUserTimezone, useUserCity } from './hooks/useUserTimezone';
 import { Auth } from './components/Auth';
 
 import { AirportManagerView }      from './views/AirportManagerView';
@@ -35,6 +35,7 @@ type View = 'dashboard' | 'orders' | 'airports' | 'monitoring' | 'simulation' | 
 function AppContent() {
   const { user, logout, isAuthenticated, login } = useAuthContext();
   const gmtOffset = useUserTimezone();
+  const userCity  = useUserCity();
   const { hubs, flights, shipments } = useNetworkData(isAuthenticated);
   const {
     session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics,
@@ -262,7 +263,7 @@ function AppContent() {
                   <span className="tabular-nums font-mono text-xs text-slate-900">
                     <span className="inline-block w-8 text-[8px] font-sans font-bold uppercase tracking-wider text-slate-400">Real</span>
                     <span className="font-black">{formatUserDate(now, gmtOffset)} · {formatUserTime(now, gmtOffset)}</span>
-                    <span className="ml-1 text-slate-400 font-sans text-[10px]">({formatGmtLabel(gmtOffset)})</span>
+                    <span className="ml-1 text-slate-500 font-sans text-[10px]">({userCity ?? formatGmtLabel(gmtOffset)})</span>
                   </span>
                 </div>
               </div>
@@ -439,7 +440,7 @@ function AppContent() {
                         <span className="text-xs font-black font-mono text-indigo-700">
                           {simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
                           {' · '}
-                          {formatUserDayTime(simNowDate ?? now, gmtOffset)} ({formatGmtLabel(gmtOffset)})
+                          {formatUserDayTime(simNowDate ?? now, gmtOffset)} ({userCity ?? formatGmtLabel(gmtOffset)})
                         </span>
                       </div>
 
@@ -514,7 +515,7 @@ function AppContent() {
             <FloatingSimClock
               realDate={formatUserDate(now, gmtOffset)}
               realTime={formatUserTime(now, gmtOffset)}
-              gmtLabel={formatGmtLabel(gmtOffset)}
+              zoneLabel={userCity ?? formatGmtLabel(gmtOffset)}
               simDate={simNowDate ? formatUserDate(simNowDate, gmtOffset) : null}
               simTime={simNowDate ? formatUserTime(simNowDate, gmtOffset) : null}
               paused={session.status === 'paused'}
@@ -771,7 +772,7 @@ function OccupancyStat({ label, pct, title }: { label: string; pct?: number | nu
   const v = occupancyVisual(pct);
   return (
     <div className="flex flex-col leading-tight px-1 shrink-0" title={title ? `${title} — ${v.label}` : v.label}>
-      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-900 whitespace-nowrap">{label}</span>
       <span className={cn('text-sm font-black font-mono leading-tight flex items-center gap-1', v.text)}>
         <span className={cn('w-2 h-2 rounded-full shrink-0', v.dot, pct != null && pct > 85 && 'animate-pulse')} />
         {pct == null || isNaN(pct) ? '—' : `${pct.toFixed(1)}%`}
@@ -792,7 +793,7 @@ function KpiPill({ label, value, tone, dot, onClick }: {
       onClick={onClick}
       title={onClick ? 'Ver detalle de incumplimientos' : undefined}
     >
-      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap flex items-center gap-1">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-900 whitespace-nowrap flex items-center gap-1">
         {dot && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />}
         {label}
       </span>
