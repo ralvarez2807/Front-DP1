@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, Plane, PlaneLanding, Package, Search, X, ChevronRight, ChevronDown, Luggage, Info } from 'lucide-react';
+import { Building2, Plane, PlaneLanding, Package, Search, X, ChevronRight, ChevronDown, Luggage, Info, ArrowUp, ArrowDown, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import {
   simulationService, SimAirport, SimFlight, SimShipment, AirportBaggage, FlightBaggage,
   InboundFlightGroup, ShipmentDiagnostics, ShipmentRouteLeg,
 } from '../services/simulationService';
-import { formatUserDayTime } from '../lib/timezone';
+import { formatUserDayTime, formatUserTime } from '../lib/timezone';
 import { useUserTimezone } from '../hooks/useUserTimezone';
 
 // ── Tipos de pestaña ─────────────────────────────────────────────────────────
@@ -58,29 +58,34 @@ function occColor(level: string, pct: number): string {
   return '#10b981';
 }
 
+// Colores de ESTADO en tonos fríos (azul / gris): el rojo/verde/ámbar quedan
+// reservados para la OCUPACIÓN (carga), no para los estados — pedido del profe.
 const FLIGHT_STATUS: Record<string, { label: string; cls: string }> = {
-  DEPARTED:  { label: 'EN VUELO',   cls: 'bg-emerald-100 text-emerald-700' },
+  DEPARTED:  { label: 'EN VUELO',   cls: 'bg-blue-100 text-blue-700' },
   SCHEDULED: { label: 'PROGRAMADO', cls: 'bg-slate-100 text-slate-500' },
   ARRIVED:   { label: 'ATERRIZADO', cls: 'bg-indigo-100 text-indigo-700' },
-  CANCELLED: { label: 'CANCELADO',  cls: 'bg-rose-100 text-rose-700' },
+  CANCELLED: { label: 'CANCELADO',  cls: 'bg-slate-300 text-slate-600' },
 };
 
 function shipmentStatus(
   s: SimShipment,
   shipmentsInFlight?: Set<string>,
 ): { label: string; cls: string; dot: string } {
+  // Colores de ESTADO en tonos fríos (azules/violetas): el rojo/verde/ámbar quedan
+  // reservados para la OCUPACIÓN (carga) — pedido del profe. Los estados-problema
+  // (sin ruta / vencido) se distinguen con violeta/fucsia, no con rojo.
   if (s.totalBaggages > 0 && s.delivered >= s.totalBaggages)
-    return { label: 'ENTREGADO',  cls: 'bg-emerald-100 text-emerald-700', dot: '#10b981' };
+    return { label: 'ENTREGADO',  cls: 'bg-indigo-100 text-indigo-700',   dot: '#6366f1' };
   if (s.breached > 0)
-    return { label: 'VENCIDO',    cls: 'bg-rose-200 text-rose-900',       dot: '#9f1239' };
+    return { label: 'VENCIDO',    cls: 'bg-fuchsia-200 text-fuchsia-900', dot: '#a21caf' };
   if (s.noRoute > 0)
-    return { label: 'SIN RUTA',   cls: 'bg-red-100 text-red-700',         dot: '#ef4444' };
+    return { label: 'SIN RUTA',   cls: 'bg-violet-200 text-violet-800',   dot: '#7c3aed' };
   if (s.late > 0)
-    return { label: 'ATRASADO',   cls: 'bg-amber-100 text-amber-700',     dot: '#f59e0b' };
+    return { label: 'ATRASADO',   cls: 'bg-purple-100 text-purple-700',   dot: '#a855f7' };
   if (s.delivered > 0 || s.onTime > 0) {
     // Diferenciar "maleta en el aire ahora" de "maleta esperando con ruta asignada"
     if (shipmentsInFlight?.has(s.shipmentId))
-      return { label: 'EN VUELO',   cls: 'bg-indigo-100 text-indigo-700',   dot: '#6366f1' };
+      return { label: 'EN VUELO',   cls: 'bg-sky-100 text-sky-700',         dot: '#0ea5e9' };
     return   { label: 'ASIGNADO',   cls: 'bg-blue-100 text-blue-700',       dot: '#3b82f6' };
   }
   return     { label: 'PENDIENTE',  cls: 'bg-slate-100 text-slate-500',     dot: '#94a3b8' };
@@ -126,6 +131,19 @@ function FilterSelect({ value, onChange, options }: {
   );
 }
 
+// Botón para alternar el sentido de ordenamiento (ascendente / descendente).
+function SortDirToggle({ dir, onToggle }: { dir: 'asc' | 'desc'; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      title={dir === 'asc' ? 'Orden ascendente' : 'Orden descendente'}
+      className="flex items-center justify-center px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-600 hover:border-indigo-400 hover:text-indigo-600 transition-colors"
+    >
+      {dir === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+    </button>
+  );
+}
+
 // ── Barra de progreso compacta ───────────────────────────────────────────────
 function Bar({ pct, color }: { pct: number; color: string }) {
   return (
@@ -138,7 +156,7 @@ function Bar({ pct, color }: { pct: number; color: string }) {
 // ── Cabecera de columnas ─────────────────────────────────────────────────────
 function ColHead({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={cn('text-[9px] font-black uppercase tracking-widest text-slate-400', className)}>
+    <span className={cn('text-[9px] font-black uppercase tracking-widest text-slate-600', className)}>
       {children}
     </span>
   );
@@ -600,6 +618,22 @@ function ShipmentInfoModal({ sessionId, shipment, onClose }: {
   const plannedEta = legs.length > 0 ? legs[legs.length - 1].arrTime : null;
   const delivered = shipment.totalBaggages > 0 && shipment.delivered >= shipment.totalBaggages;
 
+  // ── Copiar tramos al portapapeles ──────────────────────────────────────────
+  // Formato por tramo: "OJAI-UBBB-21 Jul 11:48 — 21 Jul 13:55". Con escalas, el
+  // botón de la cabecera copia todos los tramos (uno por línea).
+  const [copied, setCopied] = useState<string | null>(null);
+  // Mismo formato que el código de vuelo: ORIGEN-DESTINO-HH:mm (hora de salida en
+  // la zona horaria del usuario). Ej: "SKBO-SEQM-03:34".
+  const legText = (l: ShipmentRouteLeg) =>
+    `${l.fromIcao}-${l.toIcao}-${formatUserTime(l.depTime, gmtOffset)}`;
+  const copy = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(c => (c === key ? null : c)), 1500);
+    } catch { /* portapapeles no disponible (contexto no seguro) */ }
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div
@@ -627,7 +661,19 @@ function ShipmentInfoModal({ sessionId, shipment, onClose }: {
           </div>
 
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Ruta con tramos</p>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Ruta con tramos</p>
+              {legs.length > 0 && (
+                <button
+                  onClick={() => copy(legs.map(legText).join('\n'), 'all')}
+                  title="Copiar los vuelos del envío"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 text-[10px] font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
+                >
+                  {copied === 'all' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                  {copied === 'all' ? 'Copiado' : (legs.length > 1 ? `Copiar ${legs.length} tramos` : 'Copiar vuelo')}
+                </button>
+              )}
+            </div>
             {state.status === 'loading' && <p className="text-sm text-slate-400 py-4 text-center">Cargando ruta…</p>}
             {state.status === 'error' && <p className="text-sm text-red-500 py-4 text-center">No se pudo cargar la ruta.</p>}
             {state.status === 'ready' && legs.length === 0 && (
@@ -646,7 +692,14 @@ function ShipmentInfoModal({ sessionId, shipment, onClose }: {
                       l.state === 'ARRIVED' ? 'bg-emerald-500' : l.state === 'DEPARTED' ? 'bg-amber-500 animate-pulse' : 'bg-blue-400',
                     )} />
                     <span className="font-mono font-bold text-slate-800 w-24 shrink-0">{l.fromIcao} → {l.toIcao}</span>
-                    <span className="font-mono text-slate-500 flex-1">{fmtDiagTime(l.depTime, gmtOffset)} — {fmtDiagTime(l.arrTime, gmtOffset)}</span>
+                    <span className="font-mono text-slate-600 flex-1">{fmtDiagTime(l.depTime, gmtOffset)} — {fmtDiagTime(l.arrTime, gmtOffset)}</span>
+                    <button
+                      onClick={() => copy(legText(l), String(i))}
+                      title="Copiar este tramo"
+                      className="shrink-0 p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-slate-100 transition-colors"
+                    >
+                      {copied === String(i) ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                    </button>
                   </div>
                 ))}
               </div>
@@ -730,7 +783,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   const [apQuery, setApQuery]   = useState('');
   const [apRegion, setApRegion] = useState('');
   const [apOcc, setApOcc]       = useState('');
-  const [apSort, setApSort]     = useState<'load' | 'name' | 'region'>('load');
+  const [apSort, setApSort]     = useState<'load' | 'name'>('load');
+  const [apDir, setApDir]       = useState<'asc' | 'desc'>('desc'); // carga: mayor primero por defecto
 
   // Filtros y ordenamiento — vuelos
   const [flQuery, setFlQuery]   = useState('');
@@ -738,10 +792,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   const [flDest, setFlDest]     = useState(''); // búsqueda por destino (ICAO o ciudad)
   const [flStatus, setFlStatus] = useState('');
   const [flLoad, setFlLoad]     = useState('');
-  const [flSort, setFlSort]     = useState<'dep' | 'arr' | 'load' | 'route'>('dep');
-
-  // Filtros y ordenamiento — envíos
-  const [pkSort, setPkSort]     = useState<'deadline' | 'status' | 'progress' | 'route'>('deadline');
+  const [flSort, setFlSort]     = useState<'dep' | 'arr' | 'load'>('dep');
+  const [flDir, setFlDir]       = useState<'asc' | 'desc'>('asc'); // salida: más temprano primero por defecto
 
   // Filtros — paquetes (LE-46/LE-57/LE-100: ciudad, continente y rango de fechas,
   // resueltos client-side sobre la lista ya cargada)
@@ -782,14 +834,14 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         return true;
       })
       .sort((a, b) => {
+        const mul = apDir === 'asc' ? 1 : -1;
         switch (apSort) {
-          case 'name':   return a.city.localeCompare(b.city);
-          case 'region': return (a.continent ?? '').localeCompare(b.continent ?? '') || a.city.localeCompare(b.city);
+          case 'name':   return mul * a.city.localeCompare(b.city);
           case 'load':
-          default:       return b.occupancyPct - a.occupancyPct;
+          default:       return mul * (a.occupancyPct - b.occupancyPct);
         }
       });
-  }, [airports, apQuery, apRegion, apOcc, apSort]);
+  }, [airports, apQuery, apRegion, apOcc, apSort, apDir]);
 
   // ── Vuelos filtrados y ordenados ─────────────────────────────────────────────
   // "En vuelo" siempre primero; dentro de cada grupo, el criterio elegido por el usuario.
@@ -823,20 +875,19 @@ export const SimulationInfoPanel: React.FC<Props> = ({
       const statusDiff = (STATUS_RANK[effA] ?? 3) - (STATUS_RANK[effB] ?? 3);
       if (statusDiff !== 0) return statusDiff;
 
-      // Segundo: criterio elegido por el usuario
+      // Segundo: criterio elegido por el usuario (con sentido asc/desc)
+      const mul = flDir === 'asc' ? 1 : -1;
       switch (flSort) {
         case 'arr':
-          return new Date(a.arrTime).getTime() - new Date(b.arrTime).getTime();
+          return mul * (new Date(a.arrTime).getTime() - new Date(b.arrTime).getTime());
         case 'load':
-          return b.occupancyPct - a.occupancyPct;
-        case 'route':
-          return `${a.fromIcao}-${a.toIcao}`.localeCompare(`${b.fromIcao}-${b.toIcao}`);
+          return mul * (a.occupancyPct - b.occupancyPct);
         case 'dep':
         default:
-          return new Date(a.depTime).getTime() - new Date(b.depTime).getTime();
+          return mul * (new Date(a.depTime).getTime() - new Date(b.depTime).getTime());
       }
     });
-  }, [flights, flQuery, flOrigin, flDest, flStatus, flLoad, flSort, currentSimMs, activeFlightIds, icaoMeta]);
+  }, [flights, flQuery, flOrigin, flDest, flStatus, flLoad, flSort, flDir, currentSimMs, activeFlightIds, icaoMeta]);
 
   // ── Paquetes filtrados ──────────────────────────────────────────────────────
   const SHIPMENT_STATUS_RANK: Record<string, number> = {
@@ -875,27 +926,14 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         return true;
       })
       .sort((a, b) => {
-        // "En ruta" y "Atrasado" siempre antes de pendientes y entregados
+        // Orden fijo: por criticidad del estado (sin ruta antes que asignado/entregado)
+        // y, dentro del mismo estado, por deadline más próximo primero.
         const stA = SHIPMENT_STATUS_RANK[shipmentStatus(a, shipmentsInFlight).label] ?? 5;
         const stB = SHIPMENT_STATUS_RANK[shipmentStatus(b, shipmentsInFlight).label] ?? 5;
         if (stA !== stB) return stA - stB;
-
-        switch (pkSort) {
-          case 'status':
-            return stA - stB;
-          case 'progress': {
-            const pctA = a.totalBaggages > 0 ? a.delivered / a.totalBaggages : 0;
-            const pctB = b.totalBaggages > 0 ? b.delivered / b.totalBaggages : 0;
-            return pctA - pctB; // menos progreso primero
-          }
-          case 'route':
-            return `${a.originIcao}-${a.destIcao}`.localeCompare(`${b.originIcao}-${b.destIcao}`);
-          case 'deadline':
-          default:
-            return new Date(a.deadlineUtc).getTime() - new Date(b.deadlineUtc).getTime();
-        }
+        return new Date(a.deadlineUtc).getTime() - new Date(b.deadlineUtc).getTime();
       });
-  }, [shipments, pkQuery, pkOrigin, pkDest, pkStatus, pkSort, pkContinent, pkFrom, pkTo, icaoMeta, gmtOffset, shipmentsInFlight]);
+  }, [shipments, pkQuery, pkOrigin, pkDest, pkStatus, pkContinent, pkFrom, pkTo, icaoMeta, gmtOffset, shipmentsInFlight]);
 
   // Orden con ítem seleccionado siempre primero
   const sortedAirports = useMemo(() => {
@@ -947,7 +985,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   const tabs: { id: Tab; label: string; icon: React.ReactNode; count: number }[] = [
     { id: 'airports', label: 'Aeropuertos', icon: <Building2 className="w-4 h-4" />, count: airports.length },
     { id: 'flights',  label: 'Vuelos',      icon: <Plane className="w-4 h-4" />,     count: flights.length },
-    { id: 'packages', label: 'Paquetes',    icon: <Package className="w-4 h-4" />,   count: shipments.length },
+    { id: 'packages', label: 'Maletas',     icon: <Package className="w-4 h-4" />,   count: shipments.length },
   ];
 
   return (
@@ -1003,8 +1041,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <FilterSelect value={apSort} onChange={v => setApSort(v as typeof apSort)} options={[
                   { value: 'load',   label: 'Ordenar: Carga' },
                   { value: 'name',   label: 'Ordenar: Nombre' },
-                  { value: 'region', label: 'Ordenar: Región' },
                 ]} />
+                <SortDirToggle dir={apDir} onToggle={() => setApDir(d => d === 'asc' ? 'desc' : 'asc')} />
               </div>
               <div className="grid grid-cols-[1.6fr_0.9fr_1.4fr_auto] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
                 <ColHead>Nombre / IATA</ColHead>
@@ -1031,15 +1069,22 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                             <div className="min-w-0 flex items-center gap-1.5">
                               <ChevronDown className={cn('w-3.5 h-3.5 shrink-0 text-slate-300 transition-transform', selected ? 'rotate-0 text-indigo-500' : '-rotate-90')} />
                               <div className="min-w-0">
-                                <p className="text-[13px] font-bold text-slate-800 truncate">{a.city}</p>
-                                <p className="text-[11px] font-mono text-slate-400">{a.icao}</p>
+                                <p className="text-[13px] font-bold text-slate-900 truncate">{a.city}</p>
+                                <p className="text-[11px] font-mono font-semibold text-slate-800">{a.icao}</p>
                               </div>
                             </div>
-                            <p className="text-[12px] text-slate-500 truncate">{a.continent}</p>
+                            <p className="text-[12px] text-slate-600 truncate">{a.continent}</p>
                             <div>
+                              {/* Mismo formato de ocupación que la fila de vuelos */}
                               <div className="flex items-baseline gap-1.5 mb-1">
-                                <span className="text-lg font-black leading-none" style={{ color }}>{Math.round(a.occupancyPct)}%</span>
-                                <span className="text-[11px] font-mono text-slate-400">{a.load}/{a.capacity}</span>
+                                <span className="text-base font-black leading-none" style={{ color }}>
+                                  {a.occupancyPct < 1 && a.occupancyPct > 0
+                                    ? a.occupancyPct.toFixed(1)
+                                    : Math.round(a.occupancyPct)}%
+                                </span>
+                                <span className="text-[11px] font-mono font-semibold text-slate-900 leading-none">
+                                  {a.load}/{a.capacity}
+                                </span>
                               </div>
                               <Bar pct={a.occupancyPct} color={color} />
                             </div>
@@ -1088,20 +1133,22 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   { value: 'dep',   label: 'Ordenar: Salida' },
                   { value: 'arr',   label: 'Ordenar: Llegada' },
                   { value: 'load',  label: 'Ordenar: Carga' },
-                  { value: 'route', label: 'Ordenar: Ruta' },
                 ]} />
-              </div>
-              <div className="grid grid-cols-[1.1fr_1.3fr_1fr_1.2fr_auto] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
-                <ColHead>ID</ColHead>
-                <ColHead>Ruta</ColHead>
-                <ColHead>Estado</ColHead>
-                <ColHead>Carga</ColHead>
-                <ColHead className="text-right">ETA</ColHead>
+                <SortDirToggle dir={flDir} onToggle={() => setFlDir(d => d === 'asc' ? 'desc' : 'asc')} />
               </div>
               {sortedFlights.length === 0
                 ? <EmptyState hasSession={hasSession} kind="flights" />
                 : (
                   <div ref={listRef} className="flex-1 overflow-y-auto custom-scrollbar">
+                    {/* Header dentro del scroll (sticky): comparte el mismo ancho que las
+                        filas (el scrollbar afecta a ambos por igual) → columnas alineadas. */}
+                    <div className="grid grid-cols-[1.6fr_1fr_0.8fr_1fr_116px] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
+                      <ColHead>ID</ColHead>
+                      <ColHead>Ruta</ColHead>
+                      <ColHead>Estado</ColHead>
+                      <ColHead>Carga</ColHead>
+                      <ColHead className="text-right">ETA</ColHead>
+                    </div>
                     {sortedFlights.slice(0, MAX_ROWS).map(f => {
                       const eff = effectiveStatus(f, currentSimMs, activeFlightIds);
                       const st = FLIGHT_STATUS[eff] ?? { label: eff, cls: 'bg-slate-100 text-slate-500' };
@@ -1112,7 +1159,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                           <button
                             onClick={() => onSelectFlight(f)}
                             className={cn(
-                              'w-full grid grid-cols-[1.1fr_1.3fr_1fr_1.1fr_auto] gap-2 items-center px-4 py-3 text-left transition-colors',
+                              'w-full grid grid-cols-[1.6fr_1fr_0.8fr_1fr_116px] gap-2 items-center px-4 py-3 text-left transition-colors',
                               selected ? 'bg-amber-50' : 'hover:bg-slate-50'
                             )}
                           >
@@ -1133,14 +1180,15 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               </span>
                             </div>
                             <div>
-                              <div className="flex items-baseline gap-1 mb-1">
+                              {/* Mismo formato de ocupación que la fila de aeropuertos */}
+                              <div className="flex items-baseline gap-1.5 mb-1">
                                 <span className="text-base font-black leading-none" style={{ color }}>
                                   {f.capacity > 0
-                                    ? `${f.occupancyPct < 1 ? f.occupancyPct.toFixed(1) : Math.round(f.occupancyPct)}%`
+                                    ? `${f.occupancyPct < 1 && f.occupancyPct > 0 ? f.occupancyPct.toFixed(1) : Math.round(f.occupancyPct)}%`
                                     : '—'}
                                 </span>
                                 {f.capacity > 0 && (
-                                  <span className="text-[9px] font-mono text-slate-400 leading-none">
+                                  <span className="text-[11px] font-mono font-semibold text-slate-900 leading-none">
                                     {f.load}/{f.capacity}
                                   </span>
                                 )}
@@ -1148,8 +1196,8 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               <Bar pct={f.occupancyPct} color={color} />
                             </div>
                             <div className="text-right leading-tight">
-                              <p className="text-[10px] font-mono text-slate-400">{fmtDayTime(f.depTime, gmtOffset)} sal</p>
-                              <p className="text-[10px] font-mono text-slate-500">{fmtDayTime(f.arrTime, gmtOffset)} lle</p>
+                              <p className="text-[11px] font-mono font-bold text-slate-600">{fmtDayTime(f.depTime, gmtOffset)} sal</p>
+                              <p className="text-[11px] font-mono font-bold text-slate-800">{fmtDayTime(f.arrTime, gmtOffset)} lle</p>
                             </div>
                           </button>
                           {selected && <BaggagePanel state={flightBags[f.flightId]} />}
@@ -1171,13 +1219,10 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 <SearchInput value={pkDest} onChange={setPkDest} placeholder="Destino (ICAO/ciudad)…" />
                 <FilterSelect value={pkStatus} onChange={setPkStatus} options={[
                   { value: '',          label: 'Estado' },
-                  { value: 'VENCIDO',   label: 'Vencido (sin entregar)' },
+                  { value: 'SIN RUTA',  label: 'Sin ruta' },
                   { value: 'EN VUELO',  label: 'En vuelo' },
                   { value: 'ASIGNADO',  label: 'Asignado' },
-                  { value: 'ATRASADO',  label: 'Atrasado' },
                   { value: 'ENTREGADO', label: 'Entregado' },
-                  { value: 'SIN RUTA',  label: 'Sin ruta' },
-                  { value: 'PENDIENTE', label: 'Pendiente' },
                 ]} />
                 <FilterSelect value={pkContinent} onChange={setPkContinent}
                   options={[{ value: '', label: 'Continente' }, ...regions.map(r => ({ value: r, label: r }))]} />
@@ -1196,12 +1241,6 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                     className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-[11px] font-semibold text-slate-700 outline-none focus:border-indigo-400"
                   />
                 </div>
-                <FilterSelect value={pkSort} onChange={v => setPkSort(v as typeof pkSort)} options={[
-                  { value: 'deadline', label: 'Ordenar: Deadline' },
-                  { value: 'status',   label: 'Ordenar: Estado' },
-                  { value: 'progress', label: 'Ordenar: Progreso' },
-                  { value: 'route',    label: 'Ordenar: Ruta' },
-                ]} />
               </div>
               <div className="grid grid-cols-[1.3fr_1.2fr_1fr_1.2fr] gap-2 px-4 py-2 border-b border-slate-100 bg-slate-50/60">
                 <ColHead>ID Envío</ColHead>
@@ -1270,7 +1309,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                               <span className="text-base font-black font-mono leading-none text-slate-700">{s.delivered}/{s.totalBaggages}</span>
                             </div>
                             <Bar pct={pct} color={st.dot} />
-                            <p className="text-[9px] font-mono text-slate-400 mt-0.5">{fmtDayTime(s.deadlineUtc, gmtOffset)}</p>
+                            <p className="text-[10px] font-mono font-semibold text-slate-900 mt-0.5">{fmtDayTime(s.deadlineUtc, gmtOffset)}</p>
                           </div>
                         </div>
                       );
@@ -1284,7 +1323,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
       </AnimatePresence>
 
       {/* ── Pie ──────────────────────────────────────────────────────────────── */}
-      <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/60 flex items-center justify-between text-[10px] font-semibold text-slate-400">
+      <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/60 flex items-center justify-between text-[10px] font-semibold text-slate-600">
         {tab === 'airports' && <span>{filteredAirports.length} de {airports.length} aeropuertos</span>}
         {tab === 'flights'  && (
           <span>

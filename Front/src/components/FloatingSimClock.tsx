@@ -1,11 +1,18 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { GripVertical, Clock, Minimize2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Clock, Minimize2 } from 'lucide-react';
 import { cn } from '../lib/utils';
+
+// Ancho del panel de navegación izquierdo cuando está expandido (Tailwind w-64).
+// El reloj está fijado al viewport, así que se desplaza este ancho para no quedar
+// tapado por el panel al abrirse.
+const SIDEBAR_WIDTH = 256;
 
 interface FloatingSimClockProps {
   realDate: string;
   realTime: string;
-  gmtLabel: string;
+  /** Etiqueta de la zona horaria mostrada: la ciudad del usuario (p.ej. "Lima"),
+   *  o el GMT como respaldo si el usuario no corresponde a ninguna ciudad. */
+  zoneLabel: string;
   simDate: string | null;
   simTime: string | null;
   paused: boolean;
@@ -15,6 +22,9 @@ interface FloatingSimClockProps {
    *  automáticamente a una píldora pequeña en el borde. El usuario puede reabrirlo
    *  con un click, y minimizarlo manualmente con el botón del encabezado. */
   autoCollapse?: boolean;
+  /** true cuando el panel de navegación izquierdo está expandido; desplaza el reloj
+   *  a la derecha para que el panel no lo tape. */
+  sidebarExpanded?: boolean;
 }
 
 function Row({ label, value, tone, sub }: { label: string; value: string; tone: string; sub?: React.ReactNode }) {
@@ -29,53 +39,24 @@ function Row({ label, value, tone, sub }: { label: string; value: string; tone: 
   );
 }
 
-// Reloj flotante y movible con los 4 tiempos de la simulación (real, simulado,
-// transcurrido simulado, transcurrido real). Se arrastra desde el asa superior.
-// Se colapsa a una píldora pequeña en el borde al salir de la pantalla de
-// Simulación (autoCollapse) o manualmente; un click la vuelve a expandir.
+// Reloj flotante (posición fija) con los 4 tiempos de la simulación (real,
+// simulado, transcurrido simulado, transcurrido real). Se ubica arriba a la
+// izquierda, junto a los controles de zoom, y se desplaza si el panel de
+// navegación se expande. Se colapsa a una píldora pequeña en el borde al salir
+// de la pantalla de Simulación (autoCollapse) o manualmente; un click la reabre.
 export function FloatingSimClock({
-  realDate, realTime, gmtLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse,
+  realDate, realTime, zoneLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse, sidebarExpanded,
 }: FloatingSimClockProps) {
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const [collapsed, setCollapsed] = useState(false);
-  const widgetRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
 
   // Colapsa/expande automáticamente al cambiar de pantalla, sin bloquear el toggle
   // manual dentro de una misma pantalla (solo reacciona cuando autoCollapse cambia).
   useEffect(() => { setCollapsed(!!autoCollapse); }, [autoCollapse]);
 
-  const onDragStart = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    const rect = widgetRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      origX: pos?.x ?? rect.left,
-      origY: pos?.y ?? rect.top,
-    };
-    const onMove = (ev: MouseEvent) => {
-      if (!dragRef.current) return;
-      setPos({
-        x: dragRef.current.origX + (ev.clientX - dragRef.current.startX),
-        y: dragRef.current.origY + (ev.clientY - dragRef.current.startY),
-      });
-    };
-    const onUp = () => {
-      dragRef.current = null;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
-
   return (
     <div
-      ref={widgetRef}
-      style={pos ? { left: pos.x, top: pos.y } : undefined}
-      className={cn('fixed z-40 select-none', !pos && 'top-20 right-4')}
+      style={{ top: 72, left: (sidebarExpanded ? SIDEBAR_WIDTH : 0) + 68, transition: 'left 0.25s ease' }}
+      className={cn('fixed z-40 select-none')}
     >
       {collapsed ? (
         // ── Píldora minimizada (en el borde) ──────────────────────────────────
@@ -93,16 +74,11 @@ export function FloatingSimClock({
       ) : (
         // ── Reloj completo ────────────────────────────────────────────────────
         <div className="w-[210px] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl">
-          <div
-            onMouseDown={onDragStart}
-            className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 cursor-grab active:cursor-grabbing text-slate-400 hover:text-slate-600"
-            title="Arrastrar para mover"
-          >
-            <GripVertical className="w-3.5 h-3.5 shrink-0" />
+          <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 text-slate-500">
+            <Clock className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
             <span className="text-[9px] font-black uppercase tracking-widest flex-1">Reloj de simulación</span>
             <button
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); setCollapsed(true); }}
+              onClick={() => setCollapsed(true)}
               className="shrink-0 p-0.5 -mr-0.5 rounded hover:bg-slate-100 hover:text-slate-700"
               title="Minimizar"
             >
@@ -110,8 +86,8 @@ export function FloatingSimClock({
             </button>
           </div>
           <div className="px-3 py-2.5 space-y-1.5">
-            <Row label="Real" tone="text-slate-400" value={`${realDate} · ${realTime}`} />
-            <div className="text-right text-[9px] text-slate-400 -mt-1">{gmtLabel}</div>
+            <Row label="Real" tone="text-slate-500" value={`${realDate} · ${realTime}`} />
+            <div className="text-right text-[9px] font-semibold text-slate-500 -mt-1">{zoneLabel}</div>
             {simDate && simTime && (
               <Row
                 label="Sim" tone="text-indigo-400"

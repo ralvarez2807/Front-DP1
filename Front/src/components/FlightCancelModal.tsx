@@ -5,6 +5,8 @@ import { useMap } from '../providers/MapProvider';
 import { useToast } from '../providers/ToastProvider';
 import { simulationService, DisruptionResult } from '../services/simulationService';
 import { cn } from '../lib/utils';
+import { formatUserDayTime } from '../lib/timezone';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 // Modal de cancelación de vuelos (LE-70/LE-71): el operario elige horarios
 // (scheduleId sin fecha) manual o aleatoriamente y se inyectan como disrupciones.
@@ -13,6 +15,9 @@ import { cn } from '../lib/utils';
 interface FlightCancelModalProps {
   sessionId: string;
   onClose: () => void;
+  /** Hora simulada actual (ms). Permite mostrar QUÉ DÍA se cancelará cada horario,
+   *  replicando la regla del backend (hoy si faltan >1h, mañana si no). */
+  simNowMs?: number | null;
 }
 
 // Hora local "HH:mm" del horario, embebida en el scheduleId ("SKBO-SEQM-19:00")
@@ -20,13 +25,38 @@ function depTimeOf(scheduleId: string): string {
   return scheduleId.split('-')[2] ?? '';
 }
 
+// Instante UTC de la ocurrencia que cancelará el backend para este horario.
+// Misma regla que RunSimulationUseCase.resolveAndCancelBySchedule: se toma la
+// salida de HOY (en hora local del origen) y, si faltan menos de 1 h, la de mañana.
+function targetDepMs(scheduleId: string, originGmt: number, simNowMs: number): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(depTimeOf(scheduleId));
+  if (!m) return null;
+  const d = new Date(simNowMs);
+  const todayUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const depToday = todayUtc + (Number(m[1]) * 60 + Number(m[2])) * 60_000 - originGmt * 3_600_000;
+  return simNowMs <= depToday - 3_600_000 ? depToday : depToday + 86_400_000;
+}
+
+// La MISMA salida expresada en el huso del usuario. El scheduleId lleva la hora
+// LOCAL DEL ORIGEN (SBBR-SABE-03:01 = 03:01 en Brasilia), pero el resto de la app
+// muestra las horas en el huso del usuario (03:01 en GMT-3 = 01:01 en GMT-5). Sin
+// esto, buscar por la hora que el usuario ve en pantalla no encontraba el horario.
+function userTimeOf(scheduleId: string, originGmt: number, userGmt: number): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(depTimeOf(scheduleId));
+  if (!m) return '';
+  const mins = Number(m[1]) * 60 + Number(m[2]) - originGmt * 60 + userGmt * 60;
+  const norm = ((mins % 1440) + 1440) % 1440;
+  return `${String(Math.floor(norm / 60)).padStart(2, '0')}:${String(norm % 60).padStart(2, '0')}`;
+}
+
 // La red tiene ~3000 horarios: renderizarlos todos congela el modal.
 // Se muestran los primeros N y la búsqueda refina el resto.
 const MAX_ROWS = 300;
 
-export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId, onClose }) => {
+export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId, onClose, simNowMs }) => {
   const { projectedFlights, projectedHubs } = useMap();
   const { addToast } = useToast();
+  const userGmt = useUserTimezone();
 
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -40,6 +70,24 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
     return m;
   }, [projectedHubs]);
 
+  const gmtOf = useMemo(() => {
+    const m = new Map<string, number>();
+    projectedHubs.forEach(h => m.set(h.id, h.gmtOffset ?? 0));
+    return m;
+  }, [projectedHubs]);
+
+  // Fecha + hora de la salida que se cancelará, en el huso del USUARIO ("19 Jul 01:18")
+  // — es la referencia principal, igual que el resto de la app. Sin hora simulada,
+  // cae a solo la hora convertida (sin fecha).
+  const depLabelUser = useCallback((scheduleId: string, originId: string): string => {
+    const originGmt = gmtOf.get(originId) ?? 0;
+    if (simNowMs == null) return userTimeOf(scheduleId, originGmt, userGmt);
+    const target = targetDepMs(scheduleId, originGmt, simNowMs);
+    return target == null
+      ? userTimeOf(scheduleId, originGmt, userGmt)
+      : formatUserDayTime(target, userGmt);
+  }, [gmtOf, simNowMs, userGmt]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return projectedFlights;
@@ -48,9 +96,12 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
       f.originId.toLowerCase().includes(q) ||
       f.destinationId.toLowerCase().includes(q) ||
       (cityOf.get(f.originId) ?? '').toLowerCase().includes(q) ||
-      (cityOf.get(f.destinationId) ?? '').toLowerCase().includes(q)
+      (cityOf.get(f.destinationId) ?? '').toLowerCase().includes(q) ||
+      // …y por la hora tal como el usuario la ve en el resto de la app
+      `${f.originId}-${f.destinationId}-${userTimeOf(f.id, gmtOf.get(f.originId) ?? 0, userGmt)}`
+        .toLowerCase().includes(q)
     );
-  }, [projectedFlights, search, cityOf]);
+  }, [projectedFlights, search, cityOf, gmtOf, userGmt]);
 
   const toggle = useCallback((id: string) => {
     setSelected(prev => {
@@ -157,6 +208,8 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
                 <p className="text-[10px] text-amber-700 leading-snug">
                   Se cancela la salida de <b>hoy</b> si faltan más de 1 h simulada para su partida;
                   si no, la de <b>mañana</b>. Las maletas afectadas se replanifican automáticamente.
+                  {' '}La hora del código es <b>local del origen</b>; puedes buscar también por la hora
+                  que ves en el resto de la app.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -211,10 +264,21 @@ export const FlightCancelModal: React.FC<FlightCancelModalProps> = ({ sessionId,
                       className="accent-rose-600 shrink-0"
                     />
                     <span className="text-[11px] font-mono font-bold text-slate-800 w-40 shrink-0">{f.id}</span>
-                    <span className="text-[10px] text-slate-500 font-semibold flex-1 truncate">
+                    <span className="text-[11px] text-slate-600 font-semibold flex-1 truncate">
                       {cityOf.get(f.originId) ?? f.originId} → {cityOf.get(f.destinationId) ?? f.destinationId}
                     </span>
-                    <span className="text-[10px] font-mono text-slate-400 shrink-0">{depTimeOf(f.id)}</span>
+                    <div className="shrink-0 text-right leading-tight whitespace-nowrap">
+                      {/* Principal: la salida en el huso del usuario (como el resto de la app) */}
+                      <p className="text-[12px] font-mono font-bold text-slate-800">
+                        {depLabelUser(f.id, f.originId)}
+                      </p>
+                      {/* Secundaria: la hora local del origen, que es la que lleva el código */}
+                      {(gmtOf.get(f.originId) ?? 0) !== userGmt && (
+                        <p className="text-[9px] font-mono text-slate-400">
+                          {depTimeOf(f.id)} en {cityOf.get(f.originId) ?? f.originId}
+                        </p>
+                      )}
+                    </div>
                   </label>
                 );
               })}
