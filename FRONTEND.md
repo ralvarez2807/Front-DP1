@@ -1,5 +1,6 @@
 # Documentación del Frontend — Tasf.B2B Enterprise Operational
 
+
 > **Para Claude o cualquier desarrollador que retome este proyecto desde cero.**
 > Este documento describe toda la funcionalidad, arquitectura y detalles de implementación del frontend. Lee esto completo antes de tocar código.
 
