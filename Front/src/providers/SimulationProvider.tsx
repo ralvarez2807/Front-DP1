@@ -390,6 +390,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const sessionId     = session.id;
     const config        = session.config;
     const startTimeAtIso = session.startTimeAt;
+    const speedFactor    = session.speedFactor;
 
     // Limpieza local de la sesión (idéntica al cierre por WS).
     const teardown = () => {
@@ -408,9 +409,16 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     // tiempo simulado conocido y el motivo viene de GET /result.
     const showCollapse = (collapseReason: string | null) => {
       const scenario = config?.scenario ?? 'period_5d';
-      const simMs   = lastSimUpdateRef.current?.simMs
-        ?? (startTimeAtIso ? new Date(startTimeAtIso).getTime() : Date.now());
-      const startMs = startTimeAtIso ? new Date(startTimeAtIso).getTime() : simMs;
+      const startMs = startTimeAtIso ? new Date(startTimeAtIso).getTime() : Date.now();
+      const realElapsedMs = Date.now() - (sessionStartedAt ?? Date.now());
+      // Si nunca llegó un evento por WS con t.simulado antes del colapso
+      // (lastSimUpdateRef vacío — típico de este camino de respaldo, que se
+      // dispara cuando COLLAPSE_DETECTED no se procesó), no hay que clavar
+      // t.simulado = inicio (eso mostraba "0" de tiempo simulado transcurrido
+      // pese a que la sesión sí llevaba corriendo). Se estima con el mismo
+      // ratio que usa el acelerador: simElapsed ≈ realElapsed × speedFactor.
+      const simMs = lastSimUpdateRef.current?.simMs
+        ?? (speedFactor > 0 ? startMs + realElapsedMs * speedFactor : startMs);
       setCollapseResult({
         sessionId,
         simTime:           new Date(simMs).toISOString(),
@@ -419,7 +427,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         deadline:          '',
         consecutiveCycles: 0,
         simElapsedMs:      Math.max(0, simMs - startMs),
-        realElapsedMs:     Date.now() - (sessionStartedAt ?? Date.now()),
+        realElapsedMs,
       });
       simulationService.getSummaryReport(sessionId)
         .then(report => {
