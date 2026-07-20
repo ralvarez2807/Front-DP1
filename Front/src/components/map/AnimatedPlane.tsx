@@ -9,12 +9,14 @@ export function getPlaneColor(occupied: number, capacity: number, highlighted: b
   // Violeta para "seleccionado": el dorado/ámbar ya lo usa el estado "en alerta"
   // (70-90% de carga) y con varios aviones ámbar en pantalla se confundían.
   if (highlighted) return '#8b5cf6';
-  if (capacity === 0) return '#2563eb';
+  if (capacity === 0) return '#2563eb';        // sin dato de capacidad
+  if (occupied <= 0) return '#94a3b8';         // plomo: el avión viaja vacío
   const pct = (occupied / capacity) * 100;
+  // Umbrales alineados con la ocupación del resto de la UI (occColor: 85/60).
   // Rojo más oscuro que el de rutas/hubs (#ef4444): a este tamaño de ícono, el
   // mismo tono se perdía contra las líneas de ruta activas del mismo color.
-  if (pct >= 90) return '#b91c1c';
-  if (pct >= 70) return '#f59e0b';
+  if (pct >= 85) return '#b91c1c';
+  if (pct >= 60) return '#f59e0b';
   return '#10b981';
 }
 
@@ -87,9 +89,6 @@ export function AnimatedPlane({
       <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill={color} />
       {/* Cola */}
       <path d="M-1.5,5 L-5,8 L-4,9 L-1.5,7 L1.5,7 L4,9 L5,8 L1.5,5 Z" fill={color} />
-      {/* Borde oscuro para contraste — antes blanco, se perdía contra el mar y tierra claros */}
-      <ellipse cx="0" cy="0" rx="1.8" ry="7" fill="none" stroke="#1e293b" strokeWidth="0.6" />
-      <path d="M-1.5,-1 L-10,3 L-9,5 L-1.5,2 L1.5,2 L9,5 L10,3 L1.5,-1 Z" fill="none" stroke="#1e293b" strokeWidth="0.5" />
     </g>
   );
 }

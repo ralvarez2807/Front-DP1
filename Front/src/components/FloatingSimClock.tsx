@@ -10,7 +10,9 @@ const SIDEBAR_WIDTH = 256;
 interface FloatingSimClockProps {
   realDate: string;
   realTime: string;
-  gmtLabel: string;
+  /** Etiqueta de la zona horaria mostrada: la ciudad del usuario (p.ej. "Lima"),
+   *  o el GMT como respaldo si el usuario no corresponde a ninguna ciudad. */
+  zoneLabel: string;
   simDate: string | null;
   simTime: string | null;
   paused: boolean;
@@ -43,7 +45,7 @@ function Row({ label, value, tone, sub }: { label: string; value: string; tone: 
 // navegación se expande. Se colapsa a una píldora pequeña en el borde al salir
 // de la pantalla de Simulación (autoCollapse) o manualmente; un click la reabre.
 export function FloatingSimClock({
-  realDate, realTime, gmtLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse, sidebarExpanded,
+  realDate, realTime, zoneLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse, sidebarExpanded,
 }: FloatingSimClockProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -72,7 +74,7 @@ export function FloatingSimClock({
       ) : (
         // ── Reloj completo ────────────────────────────────────────────────────
         <div className="w-[210px] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 text-slate-400">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 text-slate-500">
             <Clock className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
             <span className="text-[9px] font-black uppercase tracking-widest flex-1">Reloj de simulación</span>
             <button
@@ -84,8 +86,8 @@ export function FloatingSimClock({
             </button>
           </div>
           <div className="px-3 py-2.5 space-y-1.5">
-            <Row label="Real" tone="text-slate-400" value={`${realDate} · ${realTime}`} />
-            <div className="text-right text-[9px] text-slate-400 -mt-1">{gmtLabel}</div>
+            <Row label="Real" tone="text-slate-500" value={`${realDate} · ${realTime}`} />
+            <div className="text-right text-[9px] font-semibold text-slate-500 -mt-1">{zoneLabel}</div>
             {simDate && simTime && (
               <Row
                 label="Sim" tone="text-indigo-400"

@@ -15,6 +15,16 @@ export function resolveGmtOffset(userName: string | null | undefined, hubs: Hub[
   return hub?.gmtOffset ?? 0;
 }
 
+/** Ciudad del operario (con su acentuación original) para etiquetar la hora que se
+ *  muestra — p.ej. "Lima" en vez de "GMT-5". null si no coincide con ninguna (admin). */
+export function resolveUserCity(userName: string | null | undefined, hubs: Hub[]): string | null {
+  if (!userName) return null;
+  const uname = normalizeCity(userName);
+  if (!uname) return null;
+  const hub = hubs.find(h => normalizeCity(h.city) === uname);
+  return hub?.city ?? null;
+}
+
 type TimeInput = string | number | Date;
 
 function toEpochMs(input: TimeInput): number {
