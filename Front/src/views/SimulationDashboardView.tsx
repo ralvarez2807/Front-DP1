@@ -20,6 +20,10 @@ import { FlightCancelModal } from '../components/FlightCancelModal';
 import { ReportRows } from '../components/SummaryReportModal';
 import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
+import { MapFiltersPanel, RegionZoomBar, MapFiltersIcon } from '../components/MapControls';
+import {
+  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, computeRegionTransform,
+} from '../lib/mapFilters';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
 import { localTodayString, formatGmtLabel } from '../lib/timezone';
@@ -417,6 +421,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
+    setActiveRegion(null);   // navegar a mano suelta el encuadre de región
     const svg = svgRef.current;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
@@ -435,6 +440,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     setLegendOpen(false);
+    setActiveRegion(null);   // arrastrar el mapa suelta el encuadre de región
     isPanning.current = true;
     panStart.current = {
       x: e.clientX,
@@ -485,6 +491,30 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       return clamp(cx - kRatio * (cx - prev.x), cy - kRatio * (cy - prev.y), rawK);
     });
   }, [clamp]);
+
+  // ── Panel de control de visualización (filtros por color) ─────────────────
+  const [mapFilters, setMapFilters] = useState<MapFilters>(DEFAULT_MAP_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const toggleFilter = useCallback(<G extends keyof MapFilters>(group: G, key: keyof MapFilters[G]) => {
+    setMapFilters(prev => ({
+      ...prev,
+      [group]: { ...prev[group], [key]: !prev[group][key as keyof (typeof prev)[G]] },
+    }));
+  }, []);
+  const resetFilters = useCallback(() => setMapFilters(DEFAULT_MAP_FILTERS), []);
+
+  // ── Zoom a regiones (continentes presentes en la red) ─────────────────────
+  const regions = useMemo(
+    () => Array.from(new Set(projectedHubs.map(h => h.continent).filter(Boolean))).sort(),
+    [projectedHubs],
+  );
+  const [activeRegion, setActiveRegion] = useState<string | null>(null);
+  const zoomToRegion = useCallback((region: string | null) => {
+    setActiveRegion(region);
+    if (region === null) { resetZoom(); return; }
+    const regionHubs = projectedHubs.filter(h => h.continent === region);
+    setViewTransform(computeRegionTransform(regionHubs, clamp));
+  }, [projectedHubs, clamp, resetZoom]);
 
   // ── Aviones en vuelo ─────────────────────────────────────────────────────
   const [activePlanes, setActivePlanes] = useState<ActivePlane[]>([]);
@@ -1342,6 +1372,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           );
         }
         if (isActive) {
+          // Filtro "Rutas activas" — la ruta seleccionada nunca se oculta (ya
+          // se manejó arriba en la rama isSelected).
+          if (!mapFilters.routes.active) return null;
           return (
             <path
               key={flight.id}
@@ -1356,6 +1389,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             />
           );
         }
+        // Filtro "Rutas disponibles" (quitar las líneas de vuelo de fondo).
+        if (!mapFilters.routes.available) return null;
         return (
           <path
             key={flight.id}
@@ -1370,7 +1405,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         );
       })}
     </g>
-  ), [uniqueRoutes, activeRoutePairSet, selectedFlight, selectedFlightId, selectedFlightIsCancelled, selectedFlightIsActive, INACTIVE_OPACITY]);
+  ), [uniqueRoutes, activeRoutePairSet, selectedFlight, selectedFlightId, selectedFlightIsCancelled, selectedFlightIsActive, INACTIVE_OPACITY, mapFilters.routes.active, mapFilters.routes.available]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -1539,6 +1574,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
               if (!origin || !dest) return null;
               const isHighlighted = plane.flightId === selectedFlightId;
               const isDimmed = selectedFlightId && !isHighlighted;
+              // Filtro por color de carga — el avión seleccionado nunca se oculta.
+              if (!isHighlighted && !mapFilters.planes[planeColorBucket(plane.occupied, plane.capacity)]) return null;
               return (
                 <g
                   key={plane.key}
@@ -1600,6 +1637,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   : pct >= 70 ? '#f59e0b'
                   : currentStorage === 0 ? '#94a3b8'   // vacío — gris neutro
                   : '#10b981';                          // óptimo — verde
+
+              // Filtro por color de almacén — el aeropuerto seleccionado (o
+              // extremo del vuelo seleccionado) nunca se oculta.
+              if (!isSelectedHub && !mapFilters.hubs[hubColorBucket(pct, currentStorage)]) return null;
 
               return (
                 <g
@@ -1891,6 +1932,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         >
           ⌂
         </button>
+        <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
       </div>
 
       {/* ── PANEL DE CONFIGURACIÓN (flotante en el mapa, disparado desde header) ── */}
@@ -2031,6 +2073,28 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         {toolbarOpen && (
         <>
         <AnimatePresence>
+          {filtersOpen && (
+            <motion.div
+              key="pop-filters"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+            >
+              <MapFiltersPanel filters={mapFilters} onToggle={toggleFilter} onReset={resetFilters} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <button
+          onClick={() => setFiltersOpen(v => !v)}
+          className={cn(
+            'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg',
+            filtersOpen ? 'bg-slate-800 text-white' : 'bg-white/90 backdrop-blur-md text-slate-600 border border-slate-200 hover:bg-slate-50'
+          )}
+        >
+          <MapFiltersIcon className="w-4 h-4" /> Mostrar
+        </button>
+        <AnimatePresence>
           {legendOpen && (
             <motion.div
               key="pop-legend"
@@ -2048,8 +2112,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                 <LegendRow dot="bg-amber-500"   label="En alerta (>70%)" />
                 <LegendRow dot="bg-red-500"     label="Punto crítico (>90%)" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
+                <LegendRow dot="bg-slate-400"   label="Vacío / sin carga" />
                 <LegendRow dot="bg-emerald-500" label="Carga normal" />
-                <LegendRow dot="bg-amber-500"   label="Casi lleno (>70%)" />
+                <LegendRow dot="bg-amber-500"   label="Casi lleno (>60%)" />
                 <LegendRow dot="bg-red-500"     label="Capacidad crítica" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
                 <div className="flex items-center gap-2.5">

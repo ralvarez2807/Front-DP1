@@ -11,6 +11,10 @@ import { FlightCancelModal } from '../components/FlightCancelModal';
 import { SummaryReportModal } from '../components/SummaryReportModal';
 import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
+import { MapFiltersPanel, RegionZoomBar, MapFiltersIcon } from '../components/MapControls';
+import {
+  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, computeRegionTransform,
+} from '../lib/mapFilters';
 import { simulationService } from '../services/simulationService';
 import { operationsSocket } from '../services/operationsService';
 import type { SimAirport, SimFlight, SimShipment, ShipmentRouteLeg } from '../services/simulationService';
@@ -193,6 +197,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
+    setActiveRegion(null);   // navegar a mano suelta el encuadre de región
     const svg = svgRef.current; if (!svg) return;
     const rect = svg.getBoundingClientRect();
     const mx = (e.clientX - rect.left) / rect.width * MAP_VIEWBOX.width;
@@ -207,6 +212,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    setActiveRegion(null);   // arrastrar el mapa suelta el encuadre de región
     isPanning.current = true;
     panStart.current = { x: e.clientX, y: e.clientY, tx: viewTransform.x, ty: viewTransform.y };
   }, [viewTransform]);
@@ -232,6 +238,30 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     const rawK = prev.k / 1.5;
     return clamp(cx - (rawK / prev.k) * (cx - prev.x), cy - (rawK / prev.k) * (cy - prev.y), rawK);
   }), [clamp]);
+
+  // ── Panel de control de visualización (filtros por color) ─────────────────
+  const [mapFilters, setMapFilters] = useState<MapFilters>(DEFAULT_MAP_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const toggleFilter = useCallback(<G extends keyof MapFilters>(group: G, key: keyof MapFilters[G]) => {
+    setMapFilters(prev => ({
+      ...prev,
+      [group]: { ...prev[group], [key]: !prev[group][key as keyof (typeof prev)[G]] },
+    }));
+  }, []);
+  const resetFilters = useCallback(() => setMapFilters(DEFAULT_MAP_FILTERS), []);
+
+  // ── Zoom a regiones (continentes presentes en la red) ─────────────────────
+  const regions = useMemo(
+    () => Array.from(new Set(projectedHubs.map(h => h.continent).filter(Boolean))).sort(),
+    [projectedHubs],
+  );
+  const [activeRegion, setActiveRegion] = useState<string | null>(null);
+  const zoomToRegion = useCallback((region: string | null) => {
+    setActiveRegion(region);
+    if (region === null) { resetZoom(); return; }
+    const regionHubs = projectedHubs.filter(h => h.continent === region);
+    setViewTransform(computeRegionTransform(regionHubs, clamp));
+  }, [projectedHubs, clamp, resetZoom]);
 
   // ── Zoom hacia hub seleccionado ───────────────────────────────────────────
   const focusOnAirport = useCallback((icao: string) => {
@@ -440,6 +470,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           );
         }
         if (isActive) {
+          // Filtro "Rutas activas" — la seleccionada nunca se oculta (rama de arriba).
+          if (!mapFilters.routes.active) return null;
           const dimmed = !!(selectedFlightId || selectedAirportId) && !isSelected;
           return (
             <path
@@ -455,6 +487,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
             />
           );
         }
+        // Filtro "Rutas disponibles" (quitar las líneas de vuelo de fondo).
+        if (!mapFilters.routes.available) return null;
         return (
           <path
             key={flight.id}
@@ -469,7 +503,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         );
       })}
     </g>
-  ), [uniqueRoutes, activeRoutePairs, selectedFlight, selectedFlightId, selectedAirportId, INACTIVE_OPACITY]);
+  ), [uniqueRoutes, activeRoutePairs, selectedFlight, selectedFlightId, selectedAirportId, INACTIVE_OPACITY, mapFilters.routes.active, mapFilters.routes.available]);
 
   // Color de hub por ocupación
   const hubColor = (pct: number, empty: boolean) =>
@@ -714,6 +748,8 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               if (!origin || !dest) return null;
               const isHighlighted = plane.flightId === selectedFlightId;
               const isDimmed = selectedFlightId && !isHighlighted;
+              // Filtro por color de carga — el avión seleccionado nunca se oculta.
+              if (!isHighlighted && !mapFilters.planes[planeColorBucket(plane.occupied, plane.capacity)]) return null;
               return (
                 <g
                   key={plane.key}
@@ -765,6 +801,10 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                 : (selectedFlight && (hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao))
                   ? '#f59e0b'
                   : hubColor(pct, load === 0);
+
+              // Filtro por color de almacén — el aeropuerto seleccionado (o extremo
+              // del vuelo seleccionado) nunca se oculta.
+              if (!isSelected && !mapFilters.hubs[hubColorBucket(pct, load)]) return null;
 
               return (
                 <g
@@ -1000,6 +1040,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700 text-xs font-bold">
           ⌂
         </button>
+        <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
       </div>
 
       {/* ── BOTONES FLOTANTES (inferior derecha, igual que Simulación) ────────
@@ -1015,6 +1056,26 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         {toolbarOpen && (
         <>
         <AnimatePresence>
+          {filtersOpen && (
+            <motion.div
+              key="pop-filters"
+              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+            >
+              <MapFiltersPanel filters={mapFilters} onToggle={toggleFilter} onReset={resetFilters} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <button
+          onClick={() => setFiltersOpen(v => !v)}
+          className={cn(
+            'px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-lg',
+            filtersOpen ? 'bg-slate-800 text-white' : 'bg-white/90 backdrop-blur-md text-slate-600 border border-slate-200 hover:bg-slate-50'
+          )}
+        >
+          <MapFiltersIcon className="w-4 h-4" /> Mostrar
+        </button>
+        <AnimatePresence>
           {legendOpen && (
             <motion.div key="pop-legend"
               initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
@@ -1029,8 +1090,9 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                 <LegendRow dot="bg-amber-500"   label="En alerta (>70%)" />
                 <LegendRow dot="bg-red-500"     label="Punto crítico (>90%)" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Aviones</p>
+                <LegendRow dot="bg-slate-400"   label="Vacío / sin carga" />
                 <LegendRow dot="bg-emerald-500" label="Carga normal" />
-                <LegendRow dot="bg-amber-500"   label="Casi lleno (>70%)" />
+                <LegendRow dot="bg-amber-500"   label="Casi lleno (>60%)" />
                 <LegendRow dot="bg-red-500"     label="Capacidad crítica" />
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 pt-1">Rutas</p>
                 <div className="flex items-center gap-2.5">
