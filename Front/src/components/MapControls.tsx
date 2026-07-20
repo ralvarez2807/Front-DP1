@@ -2,7 +2,7 @@ import React from 'react';
 import { Eye, Globe } from 'lucide-react';
 import { cn } from '../lib/utils';
 import type {
-  MapFilters, HubBucket, PlaneBucket, RouteBucket,
+  MapFilters, HubBucket, PlaneBucket, RouteBucket, HubFlightDirection,
 } from '../lib/mapFilters';
 
 // Panel de control de visualización + barra de zoom a regiones. UI pura: recibe
@@ -64,6 +64,13 @@ const ROUTE_ROWS: { key: RouteBucket; color: string; label: string; swatch: 'lin
   { key: 'active',    color: '#ef4444', label: 'Rutas activas',     swatch: 'line' },
   { key: 'available', color: '#94a3b8', label: 'Rutas disponibles', swatch: 'dash' },
 ];
+// Ocultar aeropuertos no oculta sus vuelos por sí solo — estas dos casillas
+// (combinables) extienden ese ocultamiento a los vuelos que tocan un
+// aeropuerto oculto. `true` aquí OCULTA, al revés que el resto de filtros.
+const HUB_FLIGHT_ROWS: { key: HubFlightDirection; label: string }[] = [
+  { key: 'hideIncoming', label: 'Ocultar vuelos entrantes' },
+  { key: 'hideOutgoing', label: 'Ocultar vuelos salientes' },
+];
 
 export function MapFiltersPanel({
   filters, onToggle, onReset,
@@ -75,7 +82,8 @@ export function MapFiltersPanel({
   const allOn =
     Object.values(filters.hubs).every(Boolean) &&
     Object.values(filters.planes).every(Boolean) &&
-    Object.values(filters.routes).every(Boolean);
+    Object.values(filters.routes).every(Boolean) &&
+    Object.values(filters.hubFlights).every(v => !v);
 
   return (
     <div className="w-[240px] bg-white/97 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-4">
@@ -103,6 +111,17 @@ export function MapFiltersPanel({
               label={r.label}
             />
           ))}
+          <div className="mt-1.5 pl-1 border-l-2 border-slate-100">
+            {HUB_FLIGHT_ROWS.map(r => (
+              <FilterCheck
+                key={r.key}
+                checked={filters.hubFlights[r.key]}
+                onChange={() => onToggle('hubFlights', r.key)}
+                color="#64748b"
+                label={r.label}
+              />
+            ))}
+          </div>
         </div>
 
         <div>

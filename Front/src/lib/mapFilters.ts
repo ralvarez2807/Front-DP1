@@ -19,11 +19,15 @@ export type HubBucket = 'empty' | 'optimal' | 'alert' | 'critical';
 export type PlaneBucket = 'empty' | 'normal' | 'high' | 'critical';
 // Rutas — activa (hay avión) vs disponible (línea de fondo).
 export type RouteBucket = 'active' | 'available';
+// Vuelos/rutas conectados a un aeropuerto oculto (por el filtro de arriba) —
+// a diferencia de los otros grupos, aquí `true` OCULTA (no muestra).
+export type HubFlightDirection = 'hideIncoming' | 'hideOutgoing';
 
 export interface MapFilters {
   hubs: Record<HubBucket, boolean>;
   planes: Record<PlaneBucket, boolean>;
   routes: Record<RouteBucket, boolean>;
+  hubFlights: Record<HubFlightDirection, boolean>;
 }
 
 // Estado inicial: todo visible (el filtro solo resta).
@@ -31,6 +35,7 @@ export const DEFAULT_MAP_FILTERS: MapFilters = {
   hubs:   { empty: true, optimal: true, alert: true, critical: true },
   planes: { empty: true, normal: true, high: true, critical: true },
   routes: { active: true, available: true },
+  hubFlights: { hideIncoming: false, hideOutgoing: false },
 };
 
 /**
@@ -43,6 +48,19 @@ export function hubColorBucket(pct: number, currentStorage: number): HubBucket {
   if (pct >= 70) return 'alert';
   if (currentStorage <= 0) return 'empty';
   return 'optimal';
+}
+
+/**
+ * Si un aeropuerto queda oculto por el filtro de "Aeropuertos" (checkbox de su
+ * bucket de color destildado). Se usa para, además de ocultar el marcador,
+ * ocultar los vuelos entrantes/salientes de ese aeropuerto (ver `hubFlights`).
+ */
+export function isHubHiddenByFilter(
+  pct: number,
+  currentStorage: number,
+  filters: MapFilters,
+): boolean {
+  return !filters.hubs[hubColorBucket(pct, currentStorage)];
 }
 
 /**

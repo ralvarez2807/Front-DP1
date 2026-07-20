@@ -13,7 +13,7 @@ import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { MapFiltersPanel, RegionZoomBar, MapFiltersIcon } from '../components/MapControls';
 import {
-  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, computeRegionTransform,
+  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, isHubHiddenByFilter, computeRegionTransform,
 } from '../lib/mapFilters';
 import { simulationService } from '../services/simulationService';
 import { operationsSocket } from '../services/operationsService';
@@ -249,6 +249,20 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     }));
   }, []);
   const resetFilters = useCallback(() => setMapFilters(DEFAULT_MAP_FILTERS), []);
+  // Aeropuertos ocultos por el filtro de color de almacén — usado para además
+  // ocultar los vuelos entrantes/salientes de esos aeropuertos (checkboxes
+  // "Ocultar vuelos entrantes/salientes").
+  const hiddenHubIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const hub of projectedHubs) {
+      const opsAirport = airports.get(hub.id);
+      const load = opsAirport?.load ?? hub.currentStorage;
+      const capacity = opsAirport?.capacity ?? hub.storageCapacity;
+      const pct = capacity > 0 ? (load / capacity) * 100 : 0;
+      if (isHubHiddenByFilter(pct, load, mapFilters)) set.add(hub.id);
+    }
+    return set;
+  }, [projectedHubs, airports, mapFilters]);
 
   // ── Zoom a regiones (continentes presentes en la red) ─────────────────────
   const regions = useMemo(
@@ -456,6 +470,14 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           ((flight.originId === selectedFlight.fromIcao && flight.destinationId === selectedFlight.toIcao) ||
            (flight.originId === selectedFlight.toIcao   && flight.destinationId === selectedFlight.fromIcao));
 
+        // Ocultar vuelos entrantes/salientes de un aeropuerto oculto por el
+        // filtro de "Aeropuertos" — nunca se aplica a la ruta seleccionada.
+        const hiddenByHubFlights = !isSelected && (
+          (mapFilters.hubFlights.hideOutgoing && hiddenHubIds.has(flight.originId)) ||
+          (mapFilters.hubFlights.hideIncoming && hiddenHubIds.has(flight.destinationId))
+        );
+        if (hiddenByHubFlights) return null;
+
         if (isSelected) {
           return (
             <path
@@ -503,7 +525,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
         );
       })}
     </g>
-  ), [uniqueRoutes, activeRoutePairs, selectedFlight, selectedFlightId, selectedAirportId, INACTIVE_OPACITY, mapFilters.routes.active, mapFilters.routes.available]);
+  ), [uniqueRoutes, activeRoutePairs, selectedFlight, selectedFlightId, selectedAirportId, INACTIVE_OPACITY, mapFilters.routes.active, mapFilters.routes.available, mapFilters.hubFlights, hiddenHubIds]);
 
   // Color de hub por ocupación
   const hubColor = (pct: number, empty: boolean) =>
@@ -750,6 +772,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
               const isDimmed = selectedFlightId && !isHighlighted;
               // Filtro por color de carga — el avión seleccionado nunca se oculta.
               if (!isHighlighted && !mapFilters.planes[planeColorBucket(plane.occupied, plane.capacity)]) return null;
+              // Ocultar vuelos entrantes/salientes de un aeropuerto oculto.
+              if (!isHighlighted && (
+                (mapFilters.hubFlights.hideOutgoing && hiddenHubIds.has(plane.fromIcao)) ||
+                (mapFilters.hubFlights.hideIncoming && hiddenHubIds.has(plane.toIcao))
+              )) return null;
               return (
                 <g
                   key={plane.key}
