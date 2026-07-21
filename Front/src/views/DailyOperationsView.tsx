@@ -161,6 +161,34 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     };
   }, []);
 
+  // ── Envíos con al menos una maleta en el aire ────────────────────────────
+  // Alimenta el estado "EN VUELO" del panel derecho (y su orden por criticidad).
+  // Mismo criterio que Simulación: el baggageId tiene el formato "{shipmentId}-B{n}",
+  // así que el shipmentId se deriva quitando el sufijo.
+  const [shipmentsInFlight, setShipmentsInFlight] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const shipmentIdOf = (baggageId: string) => baggageId.replace(/-B\d+$/, '');
+    const unsubDep = operationsSocket.on('BAGGAGE_DEPARTED', ({ payload }: any) => {
+      const bid = payload?.baggageId;
+      if (!bid) return;
+      setShipmentsInFlight(prev => {
+        const next = new Set(prev);
+        next.add(shipmentIdOf(bid));
+        return next;
+      });
+    });
+    const unsubDel = operationsSocket.on('BAGGAGE_DELIVERED', ({ payload }: any) => {
+      const bid = payload?.baggageId;
+      if (!bid) return;
+      setShipmentsInFlight(prev => {
+        const next = new Set(prev);
+        next.delete(shipmentIdOf(bid));
+        return next;
+      });
+    });
+    return () => { unsubDep(); unsubDel(); };
+  }, []);
+
   // ── Tooltips ─────────────────────────────────────────────────────────────
   const [hubTooltip, setHubTooltip] = useState<{
     hub: typeof projectedHubs[0]; screenX: number; screenY: number;
@@ -610,6 +638,39 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
     } catch { /* silencioso */ }
   }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs, resetZoom]);
+
+  // Dibuja la ruta de un envío MANTENIENDO el aeropuerto seleccionado/expandido.
+  // Se usa al clicar una maleta dentro del panel de un almacén (pestaña Aeropuertos):
+  // el usuario quiere ver la ruta resaltada sin que el desplegable del almacén se
+  // cierre, así que NO se toca selectedAirportId ni se selecciona un vuelo — solo se
+  // pinta el overlay y se encuadra la cámara. Réplica exacta de SimulationDashboardView.
+  const showShipmentRouteKeepingAirport = useCallback(async (shipmentId: string) => {
+    if (!ops?.id) return;
+    if (selectedShipmentId === shipmentId) {
+      setSelectedShipmentId(null);
+      setRouteOverlay(null);
+      // Deseleccionar: volver al encuadre del aeropuerto abierto (si hay), o a la vista base.
+      const hub = selectedAirportId ? projectedHubs.find(h => h.id === selectedAirportId) : null;
+      if (hub) {
+        const targetK = 5;
+        setViewTransform(clamp(
+          MAP_VIEWBOX.width / 2 - hub.projectedX! * targetK,
+          MAP_VIEWBOX.height / 2 - hub.projectedY! * targetK,
+          targetK,
+        ));
+      } else {
+        resetZoom();
+      }
+      return;
+    }
+    try {
+      const legs = await simulationService.getShipmentRoute(ops.id, shipmentId);
+      if (legs.length === 0) return;
+      setSelectedShipmentId(shipmentId);
+      setRouteOverlay({ shipmentId, legs });
+      fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
+    } catch { /* silencioso */ }
+  }, [ops?.id, selectedShipmentId, selectedAirportId, projectedHubs, clamp, fitToHubs, resetZoom]);
 
   return (
     <div className="absolute inset-0 w-full h-full bg-slate-100">
@@ -1253,9 +1314,12 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                 }
               }}
               onSelectShipment={focusOnShipment}
+              onShowAirportShipmentRoute={showShipmentRouteKeepingAirport}
+              shipmentsInFlight={shipmentsInFlight}
               activeTab={infoPanelTab}
               onTabChange={setInfoPanelTab}
               activeFlightIds={activeFlightIds}
+              currentSimMs={lastSimUpdate?.simMs ?? undefined}
             />
           </motion.div>
         )}
