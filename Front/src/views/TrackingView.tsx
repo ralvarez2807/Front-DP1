@@ -158,7 +158,7 @@ export const TrackingView: React.FC = () => {
           <Search size={22} className="text-slate-400" />
           <input
             type="text"
-            placeholder="ID de maleta (Ej: 000008788-B2 o MAN-20260620-0001-B1)"
+            placeholder="ID de maleta (Ej: 000008788-B2 o 000000001-B1)"
             value={searchId}
             onChange={(e) => setSearchId(e.target.value.toUpperCase())}
             className="w-full bg-transparent outline-none text-base font-bold text-slate-900 placeholder:text-slate-300"

@@ -24,12 +24,11 @@ import { Auth } from './components/Auth';
 
 import { AirportManagerView }      from './views/AirportManagerView';
 import { DailyOperationsView }     from './views/DailyOperationsView';
-import { MonitoringView }          from './views/MonitoringView';
 import { OrderUploadView }         from './views/OrderUploadView';
 import { SimulationDashboardView } from './views/SimulationDashboardView';
 import { TrackingView }            from './views/TrackingView';
 
-type View = 'dashboard' | 'orders' | 'airports' | 'monitoring' | 'simulation' | 'tracking';
+type View = 'dashboard' | 'orders' | 'airports' | 'simulation' | 'tracking';
 
 // ── App ─────────────────────────────────────────────────────────────────────
 function AppContent() {
@@ -205,7 +204,6 @@ function AppContent() {
           <NavItem active={activeView==='dashboard'}  icon={<LayoutDashboard />} label="Día a Día"  onClick={() => setActiveView('dashboard')} />
           <NavItem active={activeView==='orders'}     icon={<PackagePlus />}     label="Órdenes"    onClick={() => setActiveView('orders')} />
           <NavItem active={activeView==='airports'}   icon={<Warehouse />}       label="Aeropuertos" onClick={() => setActiveView('airports')} />
-          <NavItem active={activeView==='monitoring'} icon={<Activity />}        label="Monitoreo"  onClick={() => setActiveView('monitoring')} />
           <NavItem active={activeView==='simulation'} icon={<Settings2 />}       label="Simulación" onClick={() => setActiveView('simulation')} />
           <NavItem active={activeView==='tracking'}   icon={<Search />}          label="Tracking"   onClick={() => setActiveView('tracking')} />
         </nav>
@@ -465,7 +463,6 @@ function AppContent() {
               {activeView === 'orders'     && 'Carga de Órdenes'}
               {activeView === 'airports'   && 'Gestor de Aeropuertos'}
               {activeView === 'simulation' && 'Simulación'}
-              {activeView === 'monitoring' && 'Monitoreo'}
               {activeView === 'tracking'   && 'Tracking'}
             </div>
           </div>
@@ -530,7 +527,6 @@ function AppContent() {
           <AnimatePresence mode="wait">
             {activeView === 'orders'     && <OrderUploadView   key="orders"     />}
             {activeView === 'airports'   && <AirportManagerView key="airports"  />}
-            {activeView === 'monitoring' && <MonitoringView    key="monitoring" />}
             {activeView === 'tracking'   && <TrackingView      key="tracking"   />}
           </AnimatePresence>
 

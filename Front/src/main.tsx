@@ -6,7 +6,6 @@ import './index.css';
 import { AuthProvider } from './providers/AuthProvider';
 import { SocketProvider } from './providers/SocketProvider';
 import { SimulationProvider } from './providers/SimulationProvider';
-import { MonitoringProvider } from './providers/MonitoringProvider';
 import { OperationsProvider } from './providers/OperationsProvider';
 import { BulkUploadProvider } from './providers/BulkUploadProvider';
 import { ToastProvider } from './providers/ToastProvider';
@@ -19,13 +18,11 @@ createRoot(document.getElementById('root')!).render(
         <MapProvider>
           <SocketProvider>
             <SimulationProvider>
-              <MonitoringProvider>
-                <OperationsProvider>
-                  <BulkUploadProvider>
-                    <App />
-                  </BulkUploadProvider>
-                </OperationsProvider>
-              </MonitoringProvider>
+              <OperationsProvider>
+                <BulkUploadProvider>
+                  <App />
+                </BulkUploadProvider>
+              </OperationsProvider>
             </SimulationProvider>
           </SocketProvider>
         </MapProvider>
