@@ -469,9 +469,17 @@ function effectiveStatus(f: SimFlight, currentSimMs?: number, activeFlightIds?: 
   if (f.status === 'ARRIVED') return 'ARRIVED';
   if (f.status === 'CANCELLED') return 'CANCELLED';
 
-  // Si tenemos el set de aviones en mapa, es la fuente de verdad definitiva
+  // Si tenemos el set de aviones en mapa, es la fuente de verdad para "en vuelo"
   if (activeFlightIds !== undefined) {
-    return activeFlightIds.has(f.flightId) ? 'DEPARTED' : 'SCHEDULED';
+    if (activeFlightIds.has(f.flightId)) return 'DEPARTED';
+    // No está en el aire: si su hora de llegada ya pasó, aterrizó — antes todos
+    // estos caían en 'PROGRAMADO', así que en Día a Día (donde la lista arrastra
+    // todos los vuelos del día) los vuelos ya cumplidos se contaban y filtraban
+    // como programados, y el filtro "Aterrizado" salía casi vacío.
+    if (currentSimMs !== undefined && f.arrTime && new Date(f.arrTime).getTime() <= currentSimMs) {
+      return 'ARRIVED';
+    }
+    return 'SCHEDULED';
   }
 
   // Fallback sin set: el API dice DEPARTED pero sim-time aún no llegó a la salida
