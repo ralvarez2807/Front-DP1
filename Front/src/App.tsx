@@ -56,6 +56,10 @@ function AppContent() {
   }, [bulkJob?.startedAt]);
   const showBulkWidget = !!bulkJob && (bulkJob.status !== 'running' || !bulkWidgetHidden);
 
+  // Señal para abrir el panel derecho de Día a Día en la pestaña "Maletas"
+  // (la dispara el botón "Ver maletas →" de la notificación de carga masiva).
+  const [opsPackagesSignal, setOpsPackagesSignal] = useState(0);
+
   const [activeView, setActiveView] = useState<View>('dashboard');
   // Al entrar a la pestaña Simulación, si esta pestaña del navegador todavía no
   // tiene sesión cargada, vuelve a chequear si ya existe una activa en el
@@ -247,14 +251,13 @@ function AppContent() {
                 <PanelLeftOpen className="w-5 h-5" />
               </button>
             )}
-            {/* Relojes (C12–C16): momento real siempre; momento simulado solo en Simulación (Día a Día no lo muestra, corre en tiempo real).
-                Con sesión de simulación activa (en CUALQUIER pestaña — la simulación sigue corriendo en segundo plano
-                aunque estés viendo otra vista), los 4 tiempos (Real/Sim/T.Simulado/T.Real) se muestran en el reloj
-                flotante y movible sobre el mapa (ver <FloatingSimClock/> más abajo) en vez de aquí, para no duplicarlos.
-                Antes esto dependía de `activeView === 'simulation'`: al recargar la página siempre se vuelve a la
-                pestaña Dashboard por defecto, así que el reloj flotante "desaparecía" hasta volver a entrar a
-                Simulación manualmente — ahora solo depende de que haya sesión, así sobrevive la recarga. */}
-            {!session && (
+            {/* Relojes (C12–C16): la hora local del operario se muestra SIEMPRE, corra o no una
+                simulación — fuera de la pestaña Simulación el operario trabaja en tiempo real y esa
+                es la única hora que le sirve. El reloj de simulación (Real/Sim/T.Simulado/T.Real) es
+                el <FloatingSimClock/> de más abajo y ahora vive solo en su propia pestaña, así que
+                aquí únicamente se oculta esta píldora estando en Simulación con sesión activa, para
+                no mostrar la hora real dos veces. */}
+            {!(session && activeView === 'simulation') && (
               <div className="flex items-center gap-3 bg-slate-50 px-4 py-1.5 rounded-xl border border-slate-200">
                 <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
                 <div className="flex flex-col leading-tight">
@@ -502,14 +505,14 @@ function AppContent() {
             className={cn('absolute inset-0', activeView === 'dashboard' ? 'block' : 'hidden')}
             style={{ zIndex: activeView === 'dashboard' ? 1 : 0 }}
           >
-            <DailyOperationsView />
+            <DailyOperationsView openPackagesSignal={opsPackagesSignal} />
           </div>
 
-          {/* Reloj flotante y movible: los 4 tiempos (Real/Sim/T.Simulado/T.Real)
-              solo mientras hay una sesión de simulación activa — en cualquier pestaña,
-              no solo Simulación (ver header, que oculta su propio bloque de reloj en
-              ese caso para no duplicarlo). */}
-          {session && (
+          {/* Reloj flotante: los 4 tiempos (Real/Sim/T.Simulado/T.Real) SOLO en la
+              pestaña Simulación. Antes se veía en todas las pestañas, y con una
+              simulación corriendo tapaba la hora local del operario en Día a Día
+              (que corre en tiempo real y nada tiene que ver con el reloj simulado). */}
+          {session && activeView === 'simulation' && (
             <FloatingSimClock
               realDate={formatUserDate(now, gmtOffset)}
               realTime={formatUserTime(now, gmtOffset)}
@@ -519,7 +522,6 @@ function AppContent() {
               paused={session.status === 'paused'}
               simElapsed={simElapsedMs != null ? formatElapsedMs(simElapsedMs) : '0h 00m'}
               realElapsed={formatRealElapsed(elapsedRealMs)}
-              autoCollapse={activeView !== 'simulation'}
               sidebarExpanded={!sidebarCollapsed}
             />
           )}
@@ -686,10 +688,16 @@ function AppContent() {
                 </button>
               ) : (
                 <button
-                  onClick={() => { setActiveView('orders'); dismissBulkJob(); }}
+                  onClick={() => {
+                    // Lleva a Operación Día a Día con el panel derecho abierto en
+                    // "Maletas": ahí están los envíos que acaba de crear el archivo.
+                    setActiveView('dashboard');
+                    setOpsPackagesSignal(n => n + 1);
+                    dismissBulkJob();
+                  }}
                   className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors"
                 >
-                  Ver Órdenes →
+                  Ver maletas →
                 </button>
               )}
             </div>

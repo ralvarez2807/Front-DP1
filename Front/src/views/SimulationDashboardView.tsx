@@ -1786,9 +1786,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           const rect = svg?.getBoundingClientRect();
           const containerRect = svg?.parentElement?.getBoundingClientRect();
           if (!rect || !containerRect) return null;
-          // posición relativa al contenedor (que tiene position:absolute)
-          const relX = hubTooltip.screenX - containerRect.left;
-          const relY = hubTooltip.screenY - containerRect.top;
+          // Posición relativa al contenedor (que tiene position:absolute).
+          // screenX/screenY ya se guardaron relativos a ese contenedor al capturar
+          // el evento — restar containerRect.left/top otra vez desplazaba el
+          // tooltip ~el ancho del sidebar hacia la izquierda.
+          const relX = hubTooltip.screenX;
+          const relY = hubTooltip.screenY;
           const flipX = relX > containerRect.width * 0.7;
           const flipY = relY > containerRect.height * 0.7;
 

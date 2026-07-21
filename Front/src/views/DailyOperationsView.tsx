@@ -5,7 +5,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { useMap, MAP_VIEWBOX } from '../providers/MapProvider';
 import { useOperationsContext, OpsPlane } from '../providers/OperationsProvider';
-import { AnimatedPlane } from '../components/map/AnimatedPlane';
+import { AnimatedPlane, getPlaneColor } from '../components/map/AnimatedPlane';
 import { SimulationInfoPanel } from './SimulationInfoPanel';
 import { FlightCancelModal } from '../components/FlightCancelModal';
 import { SummaryReportModal } from '../components/SummaryReportModal';
@@ -60,7 +60,15 @@ function toSimFlight(p: OpsPlane): SimFlight {
   };
 }
 
-export const DailyOperationsView: React.FC = React.memo(() => {
+interface DailyOperationsViewProps {
+  /** Contador que, al incrementarse, abre el panel derecho en la pestaña "Maletas".
+   *  Lo usa la notificación global de carga masiva ("Ver maletas →") para traer al
+   *  usuario aquí y mostrarle las órdenes que acaba de cargar. Se pasa como señal
+   *  (número) y no como booleano para poder repetir la acción varias veces. */
+  openPackagesSignal?: number;
+}
+
+export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.memo(({ openPackagesSignal }) => {
   const { worldData, pathGenerator, projectedHubs, projectedFlights } = useMap();
   const { planes, airports, ops, lastSimUpdate } = useOperationsContext();
 
@@ -106,6 +114,13 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   // ── Panel lateral derecho ─────────────────────────────────────────────────
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   const [infoPanelTab, setInfoPanelTab]   = useState<'airports' | 'flights' | 'packages'>('airports');
+
+  // Señal externa (notificación de carga masiva): abrir el panel en "Maletas".
+  useEffect(() => {
+    if (!openPackagesSignal) return;   // 0/undefined = todavía no se pidió
+    setInfoPanelOpen(true);
+    setInfoPanelTab('packages');
+  }, [openPackagesSignal]);
 
   // ── Estado de selección ──────────────────────────────────────────────────
   const [selectedAirportId, setSelectedAirportId] = useState<string | null>(null);
@@ -321,35 +336,62 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     setViewTransform(clamp(W / 2 - hub.projectedX! * targetK, H / 2 - hub.projectedY! * targetK, targetK));
   }, [selectedAirportId, projectedHubs, clamp, resetZoom]);
 
-  // Selecciona un vuelo sin togglear — usada por focusOnPlane y por la selección de
-  // envíos "en vuelo" (que siempre debe seleccionar, nunca deseleccionar por rebote
-  // si ese vuelo ya estaba elegido por otra vía).
-  const selectPlaneFlight = useCallback((flightId: string, fromIcao: string, toIcao: string) => {
+  // Selecciona un vuelo sin togglear y encuadra la cámara — usada por focusOnPlane,
+  // por el panel de Vuelos y por la selección de envíos (que siempre debe
+  // seleccionar, nunca deseleccionar por rebote si ese vuelo ya estaba elegido por
+  // otra vía). Réplica de `selectFlight` de SimulationDashboardView (5d):
+  // el zoom se adapta a la longitud de la ruta y, si el vuelo está en el aire, se
+  // centra en el avión donde esté ahora en vez de en el punto medio.
+  const selectFlightRoute = useCallback((flightId: string, fromIcao: string, toIcao: string) => {
     setSelectedFlightId(flightId);
+    setSelectedAirportId(null);
     const origin = projectedHubs.find(h => h.id === fromIcao);
     const dest   = projectedHubs.find(h => h.id === toIcao);
     if (!origin || !dest) return;
-    const cx = (origin.projectedX! + dest.projectedX!) / 2;
-    const cy = (origin.projectedY! + dest.projectedY!) / 2;
-    const targetK = 4;
+    const dist = Math.sqrt(
+      (dest.projectedX! - origin.projectedX!) ** 2 + (dest.projectedY! - origin.projectedY!) ** 2,
+    );
     const W = MAP_VIEWBOX.width, H = MAP_VIEWBOX.height;
-    setViewTransform(clamp(W / 2 - cx * targetK, H / 2 - cy * targetK, targetK));
-  }, [projectedHubs, clamp]);
+    // Rutas cortas → más zoom; rutas transoceánicas → menos, para que entren enteras.
+    const targetK = Math.max(3, Math.min(8, W / (dist * 1.2)));
 
-  // ── Zoom hacia avión seleccionado (clic directo en el mapa/panel) ─────────
-  const focusOnPlane = useCallback((plane: OpsPlane) => {
-    if (plane.flightId === selectedFlightId) {
+    const plane = planes.find(p => p.flightId === flightId);
+    let fx: number, fy: number;
+    if (plane) {
+      // Misma curva Bézier que AnimatedPlane: centra en la posición actual del avión.
+      const t  = Math.min(1, (Date.now() - plane.startedAt) / plane.durationMs);
+      const bcx = (origin.projectedX! + dest.projectedX!) / 2;
+      const bcy = (origin.projectedY! + dest.projectedY!) / 2 - dist * 0.2;
+      const mt = 1 - t;
+      fx = mt*mt*origin.projectedX! + 2*mt*t*bcx + t*t*dest.projectedX!;
+      fy = mt*mt*origin.projectedY! + 2*mt*t*bcy + t*t*dest.projectedY!;
+    } else {
+      fx = (origin.projectedX! + dest.projectedX!) / 2;
+      fy = (origin.projectedY! + dest.projectedY!) / 2;
+    }
+    setViewTransform(clamp(W / 2 - fx * targetK, H / 2 - fy * targetK, targetK));
+  }, [projectedHubs, planes, clamp]);
+
+  // ── Vuelo elegido desde el panel derecho (pestaña Vuelos) ─────────────────
+  // Antes, si el vuelo no tenía avión en el mapa (programado o ya aterrizado —la
+  // mayoría de la lista), solo se marcaba como seleccionado y la cámara no se movía.
+  // Ahora siempre encuadra su ruta, igual que en la simulación de 5 días.
+  const focusOnFlightFromPanel = useCallback((sf: SimFlight) => {
+    if (sf.flightId === selectedFlightId) {
       setSelectedFlightId(null);
+      setSelectedAirportId(null);
       setSelectedShipmentId(null);
       setRouteOverlay(null);
-      resetZoom();   // deseleccionar → volver a la vista base (igual que 5d)
+      resetZoom();   // deseleccionar → volver a la vista base
       return;
     }
     setSelectedShipmentId(null);
     setRouteOverlay(null);
     setInfoPanelTab('flights');
-    selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
-  }, [selectedFlightId, selectPlaneFlight, resetZoom]);
+    // Si hay avión en vivo, sus ICAO vienen del WS (fuente de verdad); si no, las del API.
+    const plane = planes.find(p => p.flightId === sf.flightId);
+    selectFlightRoute(sf.flightId, plane?.fromIcao ?? sf.fromIcao, plane?.toIcao ?? sf.toIcao);
+  }, [selectedFlightId, planes, selectFlightRoute, resetZoom]);
 
   // ── Panel flotante del avión: sigue al avión (RAF) ────────────────────────
   // Refs espejo para leer dentro del RAF sin closures obsoletos.
@@ -406,9 +448,9 @@ export const DailyOperationsView: React.FC = React.memo(() => {
     setRouteOverlay(null);
     setInfoPanelTab('flights');
     setInfoPanelOpen(true);
-    selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
+    selectFlightRoute(plane.flightId, plane.fromIcao, plane.toIcao);
     setPlaneTooltip(null);
-  }, [selectPlaneFlight]);
+  }, [selectFlightRoute]);
 
   // ── Rutas deduplicadas ─────────────────────────────────────────────────────
   const uniqueRoutes = useMemo(() => {
@@ -617,7 +659,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       if (inFlightLeg) {
         const plane = planes.find(p => p.fromIcao === inFlightLeg.fromIcao && p.toIcao === inFlightLeg.toIcao);
         if (plane) {
-          selectPlaneFlight(plane.flightId, plane.fromIcao, plane.toIcao);
+          selectFlightRoute(plane.flightId, plane.fromIcao, plane.toIcao);
           return;
         }
       } else if (plannedLeg) {
@@ -628,7 +670,10 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           Math.abs(new Date(f.depTime).getTime() - plannedDepMs) < 60_000
         );
         if (matchedFlight) {
-          setSelectedFlightId(matchedFlight.flightId);
+          // Igual que 5d: seleccionar el vuelo programado TAMBIÉN encuadra su ruta.
+          // Antes solo se marcaba y el mapa se quedaba donde estaba, así que al
+          // clicar una maleta con ruta asignada (el caso más común) no había zoom.
+          selectFlightRoute(matchedFlight.flightId, matchedFlight.fromIcao, matchedFlight.toIcao);
           return;
         }
       }
@@ -637,7 +682,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
       setSelectedFlightId(null);
       fitToHubs([legs[0].fromIcao, ...legs.map(l => l.toIcao)]);
     } catch { /* silencioso */ }
-  }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectPlaneFlight, fitToHubs, resetZoom]);
+  }, [ops?.id, selectedShipmentId, planes, opsAllFlights, opsFlightList, selectFlightRoute, fitToHubs, resetZoom]);
 
   // Dibuja la ruta de un envío MANTENIENDO el aeropuerto seleccionado/expandido.
   // Se usa al clicar una maleta dentro del panel de un almacén (pestaña Aeropuertos):
@@ -999,8 +1044,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           const activeCount = planes.filter(p => p.fromIcao === hub.id || p.toIcao === hub.id).length;
           const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
           if (!containerRect) return null;
-          const relX = hubTooltip.screenX - containerRect.left;
-          const relY = hubTooltip.screenY - containerRect.top;
+          // screenX/screenY YA vienen relativos al contenedor (se les restó su
+          // origen al capturar el evento). Volver a restar containerRect.left/top
+          // aquí desplazaba el tooltip ~el ancho del sidebar hacia la izquierda.
+          const relX = hubTooltip.screenX;
+          const relY = hubTooltip.screenY;
           const flipX = relX > containerRect.width  * 0.7;
           const flipY = relY > containerRect.height * 0.7;
           return (
@@ -1057,8 +1105,16 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           const p = planes.find(pl => pl.key === planeTooltip.planeKey);
           if (!p) return null;
           const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
-          const loadColor = p.capacity === 0 ? '#2563eb' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
-          const loadLabel = p.capacity === 0 ? 'Sin datos' : pct >= 90 ? 'Capacidad crítica' : pct >= 70 ? 'Casi lleno' : 'Normal';
+          // Color y etiqueta derivados de la MISMA fuente que el ícono del avión y
+          // que el filtro "Aviones" del panel (umbrales 85/60). Antes este tooltip
+          // usaba 90/70 por su cuenta, así que un avión podía decir "Normal" y aun
+          // así desaparecer al destildar "Casi lleno (>60%)".
+          const bucket = planeColorBucket(p.occupied, p.capacity);
+          const loadColor = getPlaneColor(p.occupied, p.capacity, false);
+          const loadLabel = bucket === 'empty' ? (p.capacity === 0 ? 'Sin datos' : 'Vacío / sin carga')
+                          : bucket === 'critical' ? 'Capacidad crítica'
+                          : bucket === 'high' ? 'Casi lleno'
+                          : 'Carga normal';
           const flipX = planeTooltip.screenX > 700;
           const flipY = planeTooltip.screenY > 400;
           return (
@@ -1302,17 +1358,7 @@ export const DailyOperationsView: React.FC = React.memo(() => {
                 focusOnAirport(icao);
                 setSelectedFlightId(null);
               }}
-              onSelectFlight={(sf) => {
-                const plane = planes.find(p => p.flightId === sf.flightId);
-                if (plane) {
-                  focusOnPlane(plane);
-                } else {
-                  setSelectedShipmentId(null);
-                  setRouteOverlay(null);
-                  setSelectedFlightId(prev => prev === sf.flightId ? null : sf.flightId);
-                  setInfoPanelTab('flights');
-                }
-              }}
+              onSelectFlight={focusOnFlightFromPanel}
               onSelectShipment={focusOnShipment}
               onShowAirportShipmentRoute={showShipmentRouteKeepingAirport}
               shipmentsInFlight={shipmentsInFlight}
