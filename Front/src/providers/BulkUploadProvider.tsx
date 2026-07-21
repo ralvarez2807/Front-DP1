@@ -138,6 +138,7 @@ export const BulkUploadProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         try {
           await operationsService.createOrder({
             originIcao: origin, destIcao: row.dest, quantity: row.quantity, clientId: row.clientId,
+            orderId: row.orderId,
           });
           if (jobRef.current) jobRef.current.successCount += 1;
         } catch (err: any) {

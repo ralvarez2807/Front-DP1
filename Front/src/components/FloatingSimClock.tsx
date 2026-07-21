@@ -2,11 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Clock, Minimize2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
-// Ancho del panel de navegación izquierdo cuando está expandido (Tailwind w-64).
-// El reloj está fijado al viewport, así que se desplaza este ancho para no quedar
-// tapado por el panel al abrirse.
-const SIDEBAR_WIDTH = 256;
-
 interface FloatingSimClockProps {
   realDate: string;
   realTime: string;
@@ -22,8 +17,9 @@ interface FloatingSimClockProps {
    *  automáticamente a una píldora pequeña en el borde. El usuario puede reabrirlo
    *  con un click, y minimizarlo manualmente con el botón del encabezado. */
   autoCollapse?: boolean;
-  /** true cuando el panel de navegación izquierdo está expandido; desplaza el reloj
-   *  a la derecha para que el panel no lo tape. */
+  /** @deprecated Ya no se usa: el reloj se posiciona `absolute` dentro del área de
+   *  contenido (que ya empieza a la derecha del panel), así que sigue al panel
+   *  automáticamente. Se conserva para no romper el call-site. */
   sidebarExpanded?: boolean;
 }
 
@@ -45,7 +41,7 @@ function Row({ label, value, tone, sub }: { label: string; value: string; tone: 
 // navegación se expande. Se colapsa a una píldora pequeña en el borde al salir
 // de la pantalla de Simulación (autoCollapse) o manualmente; un click la reabre.
 export function FloatingSimClock({
-  realDate, realTime, zoneLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse, sidebarExpanded,
+  realDate, realTime, zoneLabel, simDate, simTime, paused, simElapsed, realElapsed, autoCollapse,
 }: FloatingSimClockProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -54,9 +50,13 @@ export function FloatingSimClock({
   useEffect(() => { setCollapsed(!!autoCollapse); }, [autoCollapse]);
 
   return (
+    // `absolute` (no `fixed`) dentro del <main> (position: relative), que ya empieza
+    // a la derecha del panel de navegación. Antes era `fixed` al viewport y en móvil
+    // "flotaba"/saltaba al hacer scroll (la barra de direcciones redimensiona el
+    // viewport visual); anclado al contenedor se comporta como los demás controles.
     <div
-      style={{ top: 72, left: (sidebarExpanded ? SIDEBAR_WIDTH : 0) + 68, transition: 'left 0.25s ease' }}
-      className={cn('fixed z-40 select-none')}
+      style={{ top: 8, left: 68 }}
+      className={cn('absolute z-40 select-none')}
     >
       {collapsed ? (
         // ── Píldora minimizada (en el borde) ──────────────────────────────────

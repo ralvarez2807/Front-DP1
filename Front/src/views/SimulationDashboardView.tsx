@@ -22,7 +22,7 @@ import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { MapFiltersPanel, RegionZoomBar, MapFiltersIcon } from '../components/MapControls';
 import {
-  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, isHubHiddenByFilter, computeRegionTransform,
+  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, isHubHiddenByFilter, isPlaneHiddenByFilter, computeRegionTransform,
 } from '../lib/mapFilters';
 import { cn } from '../lib/utils';
 import { SCENARIOS, SCENARIO_LABELS, SimulationScenario } from '../constants/domain';
@@ -1293,12 +1293,18 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     !!selectedFlightId && simFlightList.some(f => f.flightId === selectedFlightId && f.status === 'CANCELLED')
   , [selectedFlightId, simFlightList]);
 
-  // Clave por par origen-destino para evitar desfases por ID de vuelo
+  // Clave por par origen-destino para evitar desfases por ID de vuelo.
+  // Solo cuentan los aviones VISIBLES con los filtros actuales: si un vuelo se
+  // filtró (por color de carga o por tocar un aeropuerto oculto), su línea roja
+  // de "ruta activa" tampoco debe pintarse (mismo criterio que Día a Día).
   const activeRoutePairSet = useMemo(() => {
     const s = new Set<string>();
-    activePlanes.forEach(p => s.add(`${p.fromIcao}-${p.toIcao}`));
+    activePlanes.forEach(p => {
+      if (isPlaneHiddenByFilter(p.occupied, p.capacity, p.fromIcao, p.toIcao, mapFilters, hiddenHubIds)) return;
+      s.add(`${p.fromIcao}-${p.toIcao}`);
+    });
     return s;
-  }, [activePlanes]);
+  }, [activePlanes, mapFilters, hiddenHubIds]);
 
   // Fuente de verdad para "En vuelo": solo los aviones que están físicamente
   // en el mapa (activePlanes). Si no hay avión visible, el vuelo no está en vuelo.
@@ -1959,7 +1965,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         >
           ⌂
         </button>
-        <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
+        {/* Selector de región: ligeramente más arriba y a la derecha para alinear
+            su tarjeta con la columna de zoom (LE — ajuste de posición). */}
+        <div className="-mt-0.5 ml-1">
+          <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
+        </div>
       </div>
 
       {/* ── PANEL DE CONFIGURACIÓN (flotante en el mapa, disparado desde header) ── */}
@@ -2099,6 +2109,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       >
         {toolbarOpen && (
         <>
+        {/* "Mostrar" (filtros) y "Leyenda" solo tienen sentido con una simulación
+            activa — sin sesión el mapa está vacío. En Día a Día, en cambio, la
+            operación nunca para, así que allí siempre se muestran. */}
+        {hasSession && (
+        <>
         <AnimatePresence>
           {filtersOpen && (
             <motion.div
@@ -2172,6 +2187,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
         >
           <MapIcon className="w-4 h-4" /> Leyenda
         </button>
+        </>
+        )}
         {hasSession && (
           <SlaAlertsButton
             shipments={simShipmentList}

@@ -78,6 +78,30 @@ export function planeColorBucket(occupied: number, capacity: number): PlaneBucke
   return 'normal';
 }
 
+/**
+ * Si un avión queda oculto en el mapa por los filtros actuales — por su color de
+ * carga (checkbox del bucket destildado) o por tocar un aeropuerto oculto con los
+ * checkboxes "Ocultar vuelos entrantes/salientes". Debe coincidir 1:1 con las
+ * condiciones que descartan el avión en el render de ambas vistas.
+ *
+ * Se usa además para NO pintar la línea roja de "ruta activa" de un vuelo cuyo
+ * avión está filtrado: si ningún avión visible cubre ese par origen-destino, la
+ * ruta deja de considerarse activa (el usuario filtró justamente ese vuelo).
+ */
+export function isPlaneHiddenByFilter(
+  occupied: number,
+  capacity: number,
+  fromIcao: string,
+  toIcao: string,
+  filters: MapFilters,
+  hiddenHubIds: Set<string>,
+): boolean {
+  if (!filters.planes[planeColorBucket(occupied, capacity)]) return true;
+  if (filters.hubFlights.hideOutgoing && hiddenHubIds.has(fromIcao)) return true;
+  if (filters.hubFlights.hideIncoming && hiddenHubIds.has(toIcao)) return true;
+  return false;
+}
+
 // ── Zoom a regiones ─────────────────────────────────────────────────────────
 
 export interface ViewTransform { x: number; y: number; k: number }

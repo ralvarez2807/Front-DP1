@@ -61,4 +61,10 @@ export const adminService = {
     const response = await api.put(`/admin/flights/${encodeURIComponent(scheduleId)}`, changes);
     return response.data as RouteInfo;
   },
+
+  /** Elimina un vuelo programado (DELETE /admin/flights/:scheduleId). Cancela sus
+   *  instancias futuras en las sesiones activas y replanifica las maletas afectadas. */
+  deleteFlight: async (scheduleId: string): Promise<void> => {
+    await api.delete(`/admin/flights/${encodeURIComponent(scheduleId)}`);
+  },
 };

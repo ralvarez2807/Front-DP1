@@ -24,6 +24,9 @@ export interface CreateOrderRequest {
   destIcao: string;
   quantity: number;
   clientId?: string;
+  /** id de pedido explícito (opcional). El backend lo usa como id del envío/maletas;
+   *  sólo se puede reutilizar una vez que las maletas del envío anterior se entregaron. */
+  orderId?: string;
 }
 
 /** Respuesta tras registrar una orden manual (POST /operations/orders). */

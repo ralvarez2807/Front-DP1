@@ -18,6 +18,12 @@ import { localToUtcMs } from './timezone';
 //   "SPIM-2-0019169"
 //   Sin hora ⇒ se registra de inmediato (equivalente a que un operario lo tipeara
 //   a mano), sin reparto en el tiempo.
+//
+// Simplificado con id de pedido (4 campos, también "modo counter" — se registra ya):
+//   "id_pedido-dest-cant-idCliente"
+//   "000000001-SPIM-2-0019169"
+//   Igual que el de 3 campos (sin hora ⇒ inmediato), pero conserva el id de pedido
+//   del archivo. El id es informativo: el registro al backend es idéntico al simple.
 export interface ParsedOrderLine {
   lineNo: number;
   raw: string;
@@ -39,6 +45,9 @@ export interface ValidOrderRow {
   quantity: number;
   clientId: string;
   timestampMs?: number;
+  /** id de pedido del archivo (formatos de 4 y 7 campos). Se envía como orderId y el
+   *  backend lo usa como id del envío/maletas; sólo reutilizable tras entregar el anterior. */
+  orderId?: string;
 }
 
 function parseFullLine(raw: string, lineNo: number, validIcaos: Set<string>, originIcao: string, originGmtOffset: number): ParsedOrderLine {
@@ -77,6 +86,25 @@ function parseSimpleLine(raw: string, lineNo: number, validIcaos: Set<string>, o
   return { lineNo, raw, format: 'simple', dest, quantity, clientId };
 }
 
+// 4 campos: "id_pedido-dest-cant-idCliente". Igual que el simple (inmediato, sin
+// hora) pero con el id de pedido delante. El id solo se conserva para mostrarlo;
+// no cambia el registro (mismo payload que el simple: dest/cant/cliente, sin hora).
+function parseSimpleWithIdLine(raw: string, lineNo: number, validIcaos: Set<string>, originIcao: string): ParsedOrderLine {
+  const [idPedidoRaw, destRaw, qtyStr, clientIdRaw] = raw.split('-');
+  const idPedido = idPedidoRaw?.trim();
+  if (!idPedido) return { lineNo, raw, error: 'idPedido vacío' };
+  const dest = destRaw.trim().toUpperCase();
+  if (!validIcaos.has(dest)) return { lineNo, raw, error: `Aeropuerto destino desconocido: "${dest}"` };
+  if (dest === originIcao) return { lineNo, raw, error: 'El destino coincide con el origen del archivo' };
+  const quantity = parseInt(qtyStr, 10);
+  if (!/^\d+$/.test(qtyStr) || !Number.isFinite(quantity) || quantity <= 0) {
+    return { lineNo, raw, error: `Cantidad inválida: "${qtyStr}"` };
+  }
+  const clientId = clientIdRaw?.trim();
+  if (!clientId) return { lineNo, raw, error: 'idCliente vacío' };
+  return { lineNo, raw, format: 'simple', idPedido, dest, quantity, clientId };
+}
+
 export function parseEnviosFile(text: string, validIcaos: Set<string>, originIcao: string, originGmtOffset: number = 0): ParsedOrderLine[] {
   return text
     .split(/\r?\n/)
@@ -86,10 +114,11 @@ export function parseEnviosFile(text: string, validIcaos: Set<string>, originIca
       const lineNo = i + 1;
       const fieldCount = raw.split('-').length;
       if (fieldCount === 7) return parseFullLine(raw, lineNo, validIcaos, originIcao, originGmtOffset);
+      if (fieldCount === 4) return parseSimpleWithIdLine(raw, lineNo, validIcaos, originIcao);
       if (fieldCount === 3) return parseSimpleLine(raw, lineNo, validIcaos, originIcao);
       return {
         lineNo, raw,
-        error: `Se esperan 3 campos "dest-cant-cliente" o 7 campos "id-aaaammdd-hh-mm-dest-cant-cliente" (encontrados: ${fieldCount})`,
+        error: `Se esperan 3 campos "dest-cant-cliente", 4 campos "id-dest-cant-cliente" o 7 campos "id-aaaammdd-hh-mm-dest-cant-cliente" (encontrados: ${fieldCount})`,
       };
     });
 }

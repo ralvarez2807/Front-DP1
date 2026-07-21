@@ -177,7 +177,7 @@ function AppContent() {
   if (!isAuthenticated) return <Auth onLogin={login} />;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex overflow-hidden">
+    <div className="h-screen bg-slate-50 text-slate-800 font-sans flex overflow-hidden">
 
       {/* ── SIDEBAR ──────────────────────────────────────────────────────── */}
       <aside className={cn(
@@ -202,7 +202,7 @@ function AppContent() {
         </div>
 
         <nav className="flex-1 px-4 py-6 space-y-2">
-          <NavItem active={activeView==='dashboard'}  icon={<LayoutDashboard />} label="Dashboard"  onClick={() => setActiveView('dashboard')} />
+          <NavItem active={activeView==='dashboard'}  icon={<LayoutDashboard />} label="Día a Día"  onClick={() => setActiveView('dashboard')} />
           <NavItem active={activeView==='orders'}     icon={<PackagePlus />}     label="Órdenes"    onClick={() => setActiveView('orders')} />
           <NavItem active={activeView==='airports'}   icon={<Warehouse />}       label="Aeropuertos" onClick={() => setActiveView('airports')} />
           <NavItem active={activeView==='monitoring'} icon={<Activity />}        label="Monitoreo"  onClick={() => setActiveView('monitoring')} />
@@ -217,7 +217,7 @@ function AppContent() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-xs font-bold text-slate-900 truncate">{user?.name}</p>
-              <p className="text-[10px] text-slate-500 truncate capitalize">{user?.role}</p>
+              <p className="text-[10px] text-slate-500 truncate">{user?.role === 'viewer' ? 'Visor' : 'Operario'}</p>
             </div>
             <button onClick={logout} className="text-slate-400 hover:text-red-500 transition-colors">
               <LogOut className="w-4 h-4" />
@@ -304,7 +304,6 @@ function AppContent() {
                   <>
                     <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200 shrink-0">
                       <div className={cn('w-2 h-2 rounded-full shrink-0', simRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500')} />
-                      <span className="text-[9px] font-mono text-slate-400 hidden sm:block">{session.id.substring(0, 10)}…</span>
                     </div>
                     <div className="h-7 w-px bg-slate-200 shrink-0" />
                     <div className="flex gap-1 shrink-0">
@@ -395,8 +394,8 @@ function AppContent() {
                       animate={{ opacity: 1, y: 0, scaleY: 1 }}
                       exit={{ opacity: 0, y: -8, scaleY: 0.95 }}
                       transition={{ duration: 0.15 }}
-                      style={{ transformOrigin: 'top center' }}
-                      className="absolute top-full left-0 mt-2 w-[520px] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden z-50"
+                      style={{ transformOrigin: 'top right' }}
+                      className="absolute top-full right-0 mt-2 w-[520px] max-w-[calc(100vw-2rem)] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden z-50"
                     >
                       {/* Cabecera del panel */}
                       <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
@@ -409,7 +408,6 @@ function AppContent() {
                             Simulación — {session.status.toUpperCase()}
                           </span>
                         </div>
-                        <span className="text-[10px] font-mono text-slate-400">ID: {session.id.slice(0, 12)}…</span>
                       </div>
 
                       {/* Métricas */}
@@ -475,7 +473,10 @@ function AppContent() {
 
         {/* MAIN */}
         <main className={cn(
-          'flex-1 relative overflow-hidden',
+          // min-h-0 permite que este flex-item haga scroll interno en vez de crecer
+          // y estirar el layout (antes, en pestañas altas como Aeropuertos, la página
+          // entera crecía y el pie del sidebar —usuario/cerrar sesión— quedaba abajo).
+          'flex-1 relative overflow-hidden min-h-0',
           !isFullScreen && 'overflow-y-auto p-8 custom-scrollbar'
         )}>
           {/*

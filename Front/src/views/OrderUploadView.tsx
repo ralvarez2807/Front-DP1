@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   PackagePlus, Send, ArrowRight, CheckCircle2, AlertTriangle,
   Loader2, MapPin, Boxes, Clock, Info, Warehouse,
-  FileUp, FileText, ListChecks, XCircle, X, Ban,
+  FileUp, FileText, ListChecks, XCircle, X, Ban, Hash,
 } from 'lucide-react';
 import { Hub } from '../models/infrastructure';
 import { hubService } from '../services/hubService';
@@ -53,6 +53,8 @@ export const OrderUploadView: React.FC = () => {
   const [origin, setOrigin]     = useState('');
   const [dest, setDest]         = useState('');
   const [quantity, setQuantity] = useState(1);
+  // Id de pedido opcional (modo manual): si se llena, se usa como id del envío/maletas.
+  const [orderId, setOrderId]   = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]   = useState<string | null>(null);
   const [success, setSuccess] = useState<CreateOrderResponse | null>(null);
@@ -129,7 +131,8 @@ export const OrderUploadView: React.FC = () => {
       origin,
       bulkFileName ?? 'archivo.txt',
       bulkValidRows.map(r => ({
-        lineNo: r.lineNo, dest: r.dest!, quantity: r.quantity!, clientId: r.clientId!, timestampMs: r.timestampMs,
+        lineNo: r.lineNo, dest: r.dest!, quantity: r.quantity!, clientId: r.clientId!,
+        timestampMs: r.timestampMs, orderId: r.idPedido,
       })),
     );
     resetBulkFile();
@@ -147,11 +150,14 @@ export const OrderUploadView: React.FC = () => {
         originIcao: origin,
         destIcao: dest,
         quantity,
+        orderId: orderId.trim() || undefined,
       });
       setSuccess(res);
       setRecent(prev => [res, ...prev].slice(0, 12));
-      // Mantener origen/destino para cargar varias órdenes seguidas; reiniciar cantidad.
+      // Mantener origen/destino para cargar varias órdenes seguidas; reiniciar cantidad
+      // e id de pedido (reusar el mismo id daría 409 hasta que se entregue el anterior).
       setQuantity(1);
+      setOrderId('');
     } catch (err: any) {
       setError(err?.message || 'No se pudo registrar la orden.');
     } finally {
@@ -300,6 +306,23 @@ export const OrderUploadView: React.FC = () => {
                 />
               </div>
 
+              {/* Id de pedido (opcional) */}
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                  <Hash className="w-3.5 h-3.5 text-violet-600" /> Id de pedido <span className="text-slate-400 normal-case tracking-normal font-semibold">(opcional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={orderId}
+                  onChange={e => setOrderId(e.target.value)}
+                  placeholder="00000001"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors font-mono"
+                />
+                <p className="text-[10px] text-slate-400 font-semibold">
+                  Se usa como id del envío y de sus maletas. Sólo reutilizable una vez que las maletas del pedido anterior con ese id se hayan entregado.
+                </p>
+              </div>
+
               <button
                 type="submit"
                 disabled={!canSubmit}
@@ -379,9 +402,11 @@ export const OrderUploadView: React.FC = () => {
                   <FileText className="w-3.5 h-3.5 text-indigo-600" /> Archivo de envíos
                 </label>
                 <p className="text-[10px] text-slate-400 font-semibold leading-relaxed">
-                  Dos formatos, uno por línea — se detectan automáticamente:<br />
+                  Tres formatos, uno por línea — se detectan automáticamente:<br />
                   <code className="bg-slate-100 px-1 py-0.5 rounded font-mono">dest-cant-idCliente</code>
                   {' '}→ se registra ya (modo counter), sin hora.<br />
+                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono">id_pedido-dest-cant-idCliente</code>
+                  {' '}→ igual, se registra ya (modo counter), pero con id de pedido.<br />
                   <code className="bg-slate-100 px-1 py-0.5 rounded font-mono">id_pedido-aaaammdd-hh-mm-dest-cant-idCliente</code>
                   {' '}→ trae hora, se compara contra la hora real: si ya pasó se descarta, si es futura
                   se espera a que llegue esa hora exacta antes de registrarse.

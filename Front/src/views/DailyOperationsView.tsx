@@ -13,7 +13,7 @@ import { LastSolutionModal } from '../components/LastSolutionModal';
 import { SlaAlertsButton } from '../components/SlaAlertsButton';
 import { MapFiltersPanel, RegionZoomBar, MapFiltersIcon } from '../components/MapControls';
 import {
-  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, isHubHiddenByFilter, computeRegionTransform,
+  DEFAULT_MAP_FILTERS, MapFilters, hubColorBucket, planeColorBucket, isHubHiddenByFilter, isPlaneHiddenByFilter, computeRegionTransform,
 } from '../lib/mapFilters';
 import { simulationService } from '../services/simulationService';
 import { operationsSocket } from '../services/operationsService';
@@ -394,11 +394,17 @@ export const DailyOperationsView: React.FC = React.memo(() => {
   }, [projectedFlights]);
 
   // ── Pares de ruta activos ─────────────────────────────────────────────────
+  // Solo cuentan los aviones VISIBLES con los filtros actuales: si un vuelo se
+  // filtró (por color de carga o por tocar un aeropuerto oculto), su línea roja
+  // de "ruta activa" tampoco debe pintarse (LE — filtrar aviones oculta su ruta).
   const activeRoutePairs = useMemo(() => {
     const s = new Set<string>();
-    planes.forEach(p => s.add(`${p.fromIcao}-${p.toIcao}`));
+    planes.forEach(p => {
+      if (isPlaneHiddenByFilter(p.occupied, p.capacity, p.fromIcao, p.toIcao, mapFilters, hiddenHubIds)) return;
+      s.add(`${p.fromIcao}-${p.toIcao}`);
+    });
     return s;
-  }, [planes]);
+  }, [planes, mapFilters, hiddenHubIds]);
 
   const activeHubs = useMemo(() => {
     const s = new Set<string>();
@@ -1067,7 +1073,11 @@ export const DailyOperationsView: React.FC = React.memo(() => {
           className="w-9 h-9 bg-white/90 backdrop-blur-md rounded-xl border border-slate-200 shadow-lg flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-700 text-xs font-bold">
           ⌂
         </button>
-        <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
+        {/* Selector de región: ligeramente más arriba y a la derecha para alinear
+            su tarjeta con la columna de zoom (LE — ajuste de posición). */}
+        <div className="-mt-0.5 ml-1">
+          <RegionZoomBar regions={regions} active={activeRegion} onPick={zoomToRegion} />
+        </div>
       </div>
 
       {/* ── BOTONES FLOTANTES (inferior derecha, igual que Simulación) ────────
