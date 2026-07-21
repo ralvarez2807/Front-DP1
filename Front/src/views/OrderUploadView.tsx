@@ -315,11 +315,13 @@ export const OrderUploadView: React.FC = () => {
                   type="text"
                   value={orderId}
                   onChange={e => setOrderId(e.target.value)}
-                  placeholder="00000001"
+                  placeholder="000010279"
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:border-blue-500 transition-colors font-mono"
                 />
                 <p className="text-[10px] text-slate-400 font-semibold">
-                  Se usa como id del envío y de sus maletas. Sólo reutilizable una vez que las maletas del pedido anterior con ese id se hayan entregado.
+                  Se usa como id del envío y de sus maletas. Si se deja vacío se toma el primer
+                  correlativo libre de 9 cifras (000000001, 000000002, …). Sólo reutilizable una vez
+                  que las maletas del pedido anterior con ese id se hayan entregado.
                 </p>
               </div>
 
