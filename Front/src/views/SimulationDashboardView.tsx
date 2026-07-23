@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import {
   Play, Pause, RotateCcw, Settings2, Database,
   Map as MapIcon, Clock, AlertTriangle, CheckCircle, Package,
-  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, XCircle,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, LayoutGrid, XCircle, FileText,
 } from 'lucide-react';
 import { Plane, Crosshair, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -238,6 +238,9 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
   }, [toolbarOpen]);
   // Última solución exitosa: rutas asignadas (GET /simulations/:id/result)
   const [lastSolutionOpen, setLastSolutionOpen] = useState(false);
+  // Reporte de la última simulación de la cuenta, visible desde la pantalla de
+  // configuración (GET /simulations/mine/result — sin TTL, ver LastSolutionModal).
+  const [myLastSolutionOpen, setMyLastSolutionOpen] = useState(false);
   const simHubLoads = useMemo(() => {
     const m = new Map<string, { load: number; capacity: number }>();
     simAirportList.forEach(a => m.set(a.icao, { load: a.load, capacity: a.capacity }));
@@ -2095,6 +2098,13 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                   <Database className="w-4 h-4" />
                   {isLoading ? 'Inicializando…' : 'Iniciar Simulación'}
                 </button>
+
+                <button
+                  onClick={() => setMyLastSolutionOpen(true)}
+                  className="w-full py-2 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 font-bold text-[10px] uppercase tracking-widest transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5" /> Ver reporte de la última simulación
+                </button>
               </div>
             </motion.div>
           )}
@@ -2333,6 +2343,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
       {lastSolutionOpen && completionReport?.__sessionId && (
         <LastSolutionModal sessionId={completionReport.__sessionId} onClose={() => setLastSolutionOpen(false)} />
+      )}
+
+      {myLastSolutionOpen && (
+        <LastSolutionModal onClose={() => setMyLastSolutionOpen(false)} />
       )}
 
       {/* ── MODAL: Advertencia Colapso ───────────────────────────────────────── */}

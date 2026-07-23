@@ -334,6 +334,17 @@ export const simulationService = {
     return response.data;
   },
 
+  // Última solución exitosa de la CUENTA (no de una sesión puntual) — a diferencia
+  // de getResult (TTL 5 min desde el último snapshot), esta vista es permanente:
+  // el backend la sobreescribe solo cuando la cuenta vuelve a correr otra
+  // simulación (ver FinishedSessionCache.findByAccountOrThrow). Sirve para ver el
+  // resultado de la última corrida desde la pantalla de configuración, antes de
+  // arrancar una nueva — momento en el que el sessionId anterior ya expiró.
+  getMyResult: async (signal?: AbortSignal): Promise<SimulationResult> => {
+    const response = await api.get('/simulations/mine/result', { signal });
+    return response.data;
+  },
+
   getSimAirports: async (id: string, signal?: AbortSignal): Promise<SimAirport[]> => {
     const response = await api.get(`/simulations/${id}/airports`, { signal });
     return response.data;

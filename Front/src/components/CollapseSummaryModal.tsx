@@ -76,15 +76,27 @@ export function CollapseSummaryModal({ result, onClose }: { result: CollapseResu
             </div>
           </div>
 
-          {/* Reporte de la última planificación estable al momento del colapso (G10) */}
-          {result.report && (
-            <div className="border-t border-slate-100 pt-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                Última planificación estable
-              </p>
-              <ReportRows report={result.report} gmtOffset={gmtOffset} />
-            </div>
-          )}
+          {/* Reporte de la última planificación estable al momento del colapso (G10).
+              `report` distingue tres estados explícitos: undefined = todavía
+              cargando (fetch en curso, ver fetchReportWithRetry), null = se
+              reintentó y falló, objeto = éxito. Antes, un fetch fallido dejaba
+              `report` en undefined para siempre y esta sección simplemente
+              desaparecía sin aviso — indistinguible de "todavía cargando". */}
+          <div className="border-t border-slate-100 pt-4">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+              Última planificación estable
+            </p>
+            {result.report === undefined && (
+              <div className="flex items-center gap-2 text-xs text-slate-400 py-2">
+                <span className="w-3.5 h-3.5 rounded-full border-2 border-slate-300 border-t-transparent animate-spin shrink-0" />
+                Cargando reporte…
+              </div>
+            )}
+            {result.report === null && (
+              <p className="text-sm text-slate-500 text-center py-2">No se pudo obtener el reporte de la última planificación.</p>
+            )}
+            {result.report && <ReportRows report={result.report} gmtOffset={gmtOffset} />}
+          </div>
 
           <button
             onClick={() => setLastSolutionOpen(true)}

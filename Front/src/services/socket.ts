@@ -21,7 +21,6 @@ export class SocketService {
     this.lastSeq = -1;
 
     if (this.socket) {
-      this.socket.onclose = null;
       this.socket.close();
       this.socket = null;
     }
@@ -51,15 +50,27 @@ export class SocketService {
     console.log('[Socket] Connecting to', url);
 
     try {
-      this.socket = new WebSocket(url);
+      const ws = new WebSocket(url);
+      this.socket = ws;
 
-      this.socket.onopen = () => {
+      // Guard `this.socket !== ws` en los 4 handlers: al reconectar (nueva sesión,
+      // o retry automático) el socket viejo puede tener mensajes ya en tránsito
+      // (encolados por el browser antes del close()). Sin este guard, un evento
+      // tardío del socket VIEJO (p. ej. un COLLAPSE_DETECTED de una sesión que ya
+      // se pausó/cerró) se emitía igual — y como los listeners de SimulationProvider
+      // ya están suscritos para la sesión NUEVA, se procesaba como si fuera de
+      // ésta, mostrando el colapso equivocado. Comparar por identidad de instancia
+      // (no por sessionId, que no viaja en el mensaje) es la única forma correcta
+      // de saber si este socket sigue siendo el vigente.
+      ws.onopen = () => {
+        if (this.socket !== ws) return;
         console.log('[Socket] Connected');
         this.reconnectAttempts = 0;
         this.emit('__OPEN__', {});
       };
 
-      this.socket.onmessage = (event) => {
+      ws.onmessage = (event) => {
+        if (this.socket !== ws) return;
         try {
           const message: SocketMessage = JSON.parse(event.data);
           const { seq } = message;
@@ -81,7 +92,8 @@ export class SocketService {
         }
       };
 
-      this.socket.onclose = () => {
+      ws.onclose = () => {
+        if (this.socket !== ws) return;
         console.warn('[Socket] Disconnected');
         this.socket = null;
         this.emit('__CLOSE__', {});
@@ -90,12 +102,35 @@ export class SocketService {
         }
       };
 
-      this.socket.onerror = (error) => {
+      ws.onerror = (error) => {
+        if (this.socket !== ws) return;
         console.error('[Socket] Error', error);
       };
     } catch (error) {
       console.error('[Socket] Connection failed', error);
     }
+  }
+
+  /**
+   * Fuerza una reconexión inmediata, ignorando el backoff/límite normal de
+   * intentos. Pensado para cuando la pestaña vuelve a estar visible tras un
+   * buen rato en segundo plano: el backoff de `_attemptReconnect` corre con
+   * `setTimeout`, que los navegadores throttlean agresivamente en pestañas no
+   * visibles (o pausan del todo si el equipo se suspende) — el cupo de
+   * `maxReconnectAttempts` puede agotarse sin que el usuario se entere, y a
+   * partir de ahí no hay ningún reintento más programado. No hace nada si la
+   * sesión se cerró intencionalmente (pause/stop) ni si ya hay una conexión
+   * abierta.
+   */
+  forceReconnect(sessionId: string) {
+    if (this.intentionalDisconnect) return;
+    if (this.socket?.readyState === WebSocket.OPEN) return;
+    this.reconnectAttempts = 0;
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+    this._doConnect(sessionId);
   }
 
   private _attemptReconnect(sessionId: string) {

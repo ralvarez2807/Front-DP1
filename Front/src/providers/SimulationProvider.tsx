@@ -68,6 +68,23 @@ function estimateStartedAt(simStartIso: string, simTimeIso: string, speedFactor:
   return Date.now() - Math.max(0, estimatedRealElapsedMs);
 }
 
+// El backend mantiene la sesión terminada en su registry solo ~15s de margen
+// (REGISTRY_GRACE_SECONDS) antes de liberarla — pasado eso, /reports/summary
+// devuelve 404. Un solo intento fallido (red lenta, o el WS mismo llegó tarde
+// por lag) dejaba el reporte final en blanco para siempre, sin ningún aviso —
+// se veía como una pantalla rota en vez de un error explícito. Reintenta unas
+// pocas veces dentro de esa ventana antes de rendirse.
+async function fetchReportWithRetry(sessionId: string, attempts = 3, delayMs = 1500): Promise<any | null> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await simulationService.getSummaryReport(sessionId);
+    } catch {
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  return null;
+}
+
 function toOperationalEvent(type: BackendEventType, payload: any, simTime?: string): OperationalEvent {
   return {
     id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -135,6 +152,12 @@ interface SimulationContextType {
   collapseResult: CollapseResult | null;
   clearCollapseResult: () => void;
   dashboardMetrics: DashboardMetrics | null;
+  /** Acción de ciclo de vida en curso (pausa/reanudar/detener) — mientras no sea
+   *  null, la UI debe deshabilitar esos controles: sin esto, un click en "pausar"
+   *  con latencia de red no bloqueaba el botón "reiniciar" ni "iniciar", y un
+   *  segundo click disparaba una petición en paralelo que carreaba con la primera
+   *  (síntoma reportado: pausa lenta + reinicio inmediato → estado inconsistente). */
+  actionPending: 'start' | 'pause' | 'reset' | null;
   /** Vuelve a chequear GET /simulations/mine — usado al entrar a la pestaña
    *  Simulación por si una sesión se creó en otra pestaña después del montaje. */
   checkForExistingSession: () => Promise<void>;
@@ -165,11 +188,17 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // colapso vía GET /result.
   const lastSimUpdateRef = useRef<{ simMs: number; realMs: number } | null>(null);
   useEffect(() => { lastSimUpdateRef.current = lastSimUpdate; }, [lastSimUpdate]);
+  // Espejo de la sesión activa para leer startTimeAt/scenario desde el listener de
+  // COLLAPSE_DETECTED sin que ese efecto tenga que re-suscribirse en cada evento
+  // (ver por qué en el comentario de ese efecto, más abajo).
+  const sessionRef = useRef<SimulationSession | null>(null);
+  useEffect(() => { sessionRef.current = session; }, [session]);
   const [completionReport, setCompletionReport] = useState<any | null>(null);
   const clearCompletionReport = useCallback(() => setCompletionReport(null), []);
   const [collapseResult, setCollapseResult] = useState<CollapseResult | null>(null);
   const clearCollapseResult = useCallback(() => setCollapseResult(null), []);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics | null>(null);
+  const [actionPending, setActionPending] = useState<'start' | 'pause' | 'reset' | null>(null);
 
   // ── Polling de métricas del dashboard ────────────────────────────────────
   useEffect(() => {
@@ -284,12 +313,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         const scenario = prev.config?.scenario ?? 'period_5d';
         // Fetch asíncrono del reporte — no bloquea el render. Además se guarda
         // en el historial local para la comparativa de ejecuciones (LE-76).
-        simulationService.getSummaryReport(runId)
-          .then(report => {
+        fetchReportWithRetry(runId).then(report => {
+          if (report) {
             setCompletionReport({ ...report, __outcome: status, __sessionId: runId });
-            saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: status, report });
-          })
-          .catch(() => setCompletionReport({ error: true, __outcome: status, __sessionId: runId }));
+          } else {
+            setCompletionReport({ error: true, __outcome: status, __sessionId: runId });
+          }
+          saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: status, report });
+        });
         return null;
       });
       if (alreadyHandled) return;
@@ -315,16 +346,31 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // Finaliza la sesión localmente como si hubiera terminado normalmente — el
   // backend la detiene y termina en status "completed", pero no esperamos a
   // ese SIM_STATUS para cerrar: el modal de colapso ya informa el desenlace.
+  //
+  // Depende SOLO de `session?.id` (igual que el resto de efectos de este
+  // archivo) y no del objeto `session` completo — startTimeAt/scenario se leen
+  // de `sessionRef` dentro del handler. Antes dependía de `session`, que
+  // recibe un objeto NUEVO en cada evento de backend (ver el listener de
+  // BACKEND_EVENTS más arriba, `currentTimeAt` cambia en cada uno), así que
+  // este efecto se des/re-suscribía del socket en CADA evento. En el escenario
+  // "Simulación hasta el Colapso" (speedFactor 1000, muchísimos más eventos
+  // por segundo real que los demás escenarios) ese churn de-suscribir/re-
+  // suscribir podía llegar a miles de veces por corrida — el candidato más
+  // probable tanto para el lag reportado al pausar como para que, alguna vez,
+  // el propio COLLAPSE_DETECTED llegara justo en medio de un ciclo de
+  // resuscripción y no se procesara (sin re-suscribirse en cada evento, el
+  // listener queda fijo una sola vez por sesión, sin ese hueco).
   useEffect(() => {
-    if (!session?.startTimeAt) return;
-    const startTimeAt = session.startTimeAt;
-    const sessionId   = session.id;
-    const scenario    = session.config?.scenario ?? 'collapse';
+    if (!session?.id) return;
+    const sessionId = session.id;
 
     const unsub = socket.on('COLLAPSE_DETECTED', ({ payload }: { payload: {
       simTime: string; reason: string; baggageId: string; deadline: string; consecutiveCycles: number;
     } }) => {
       if (!payload?.simTime) return;
+      const current    = sessionRef.current;
+      const startTimeAt = current?.startTimeAt ?? payload.simTime;
+      const scenario    = current?.config?.scenario ?? 'collapse';
       const simElapsedMs  = new Date(payload.simTime).getTime() - new Date(startTimeAt).getTime();
       const realElapsedMs = Date.now() - (sessionStartedAt ?? Date.now());
       setCollapseResult({
@@ -338,15 +384,15 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         realElapsedMs,
       });
       // Reporte de la última planificación estable al colapsar (G10) — best effort,
-      // el backend detiene la sesión justo después de emitir el evento.
-      simulationService.getSummaryReport(sessionId)
-        .then(report => {
-          setCollapseResult(prev => prev ? { ...prev, report } : prev);
-          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
-        })
-        .catch(() => {
-          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report: null });
-        });
+      // el backend detiene la sesión justo después de emitir el evento. Se
+      // resuelve SIEMPRE (con reintentos, ver fetchReportWithRetry) a un valor
+      // explícito — null si falla — para que el modal pueda distinguir "todavía
+      // cargando" (report === undefined) de "no se pudo traer" (report === null)
+      // en vez de quedarse en blanco para siempre sin ningún aviso.
+      fetchReportWithRetry(sessionId).then(report => {
+        setCollapseResult(prev => prev ? { ...prev, report } : prev);
+        saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
+      });
       socketService.disconnect();
       localStorage.removeItem('simulation_config');
       clearStoredStartedAt();
@@ -356,7 +402,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       setLastSimUpdate(null);
     });
     return unsub;
-  }, [socket, session, sessionStartedAt]);
+  }, [socket, session?.id, sessionStartedAt]);
 
   // ── Resync por gap en seq del WebSocket ───────────────────────────────────
   useEffect(() => {
@@ -429,12 +475,10 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         simElapsedMs:      Math.max(0, simMs - startMs),
         realElapsedMs,
       });
-      simulationService.getSummaryReport(sessionId)
-        .then(report => {
-          setCollapseResult(prev => prev ? { ...prev, report } : prev);
-          saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
-        })
-        .catch(() => saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report: null }));
+      fetchReportWithRetry(sessionId).then(report => {
+        setCollapseResult(prev => prev ? { ...prev, report } : prev);
+        saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome: 'collapsed', report });
+      });
     };
 
     const poll = async () => {
@@ -450,12 +494,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           if (updated.status === 'completed' || updated.status === 'stopped') {
             const outcome: 'completed' | 'stopped' = updated.status;
             const scenario = config?.scenario ?? 'period_5d';
-            simulationService.getSummaryReport(sessionId)
-              .then(report => {
+            fetchReportWithRetry(sessionId).then(report => {
+              if (report) {
                 setCompletionReport({ ...report, __outcome: outcome, __sessionId: sessionId });
-                saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
-              })
-              .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
+              } else {
+                setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId });
+              }
+              saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
+            });
           }
           teardown();
           if (updated.status === 'collapsed') {
@@ -511,12 +557,35 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       }
     };
 
+    // Recuperación al volver de segundo plano: los navegadores throttlean
+    // agresivamente setInterval/setTimeout en pestañas no visibles (o los
+    // pausan del todo si el equipo se suspende) — tanto este poll de 4s como
+    // el backoff de reconexión del WS (ver socketService.forceReconnect)
+    // pueden quedar sin correr mientras la pestaña está de fondo. Sin esto,
+    // al volver había que esperar al próximo tick throttleado (podía tardar
+    // minutos) para enterarse de que la sesión había terminado — y si para
+    // entonces ya pasó la ventana de gracia del backend (15s en el registry,
+    // ~5 min en /result), no quedaba nada que mostrar: ni reporte ni sesión.
+    // Se escucha tanto `visibilitychange` (cambio de pestaña) como `focus`
+    // (volver desde otra ventana/app — no siempre dispara visibilitychange).
+    const onRegainFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      socketService.forceReconnect(sessionId);
+      poll();
+    };
+    document.addEventListener('visibilitychange', onRegainFocus);
+    window.addEventListener('focus', onRegainFocus);
+
     // Llamada inmediata: sin esto, setInterval espera 4s para el primer chequeo,
     // y si algo recrea este efecto antes de ese primer tick (p. ej. session?.status
     // cambia por otra vía) el poll de respaldo podía no llegar a ejecutarse NUNCA.
     poll();
     const id = setInterval(poll, 4_000);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onRegainFocus);
+      window.removeEventListener('focus', onRegainFocus);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.status]);
 
@@ -574,61 +643,71 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   }, [addToast, gmtOffset]);
 
   const startSimulation = useCallback(async () => {
-    if (!session) return;
+    if (!session || actionPending) return;
+    setActionPending('start');
     try {
       await simulationService.resume(session.id);
       setSession(prev => prev ? { ...prev, status: 'running' } : null);
       addToast('Simulación iniciada', 'info');
     } catch {
       addToast('Fallo al iniciar simulación', 'error');
+    } finally {
+      setActionPending(null);
     }
-  }, [session, addToast]);
+  }, [session, addToast, actionPending]);
 
   const pauseSimulation = useCallback(async () => {
-    if (!session) return;
+    if (!session || actionPending) return;
+    setActionPending('pause');
     try {
       await simulationService.pause(session.id);
       setSession(prev => prev ? { ...prev, status: 'paused' } : null);
       addToast('Simulación pausada', 'warning');
     } catch {
       addToast('Error al pausar', 'error');
+    } finally {
+      setActionPending(null);
     }
-  }, [session, addToast]);
+  }, [session, addToast, actionPending]);
 
   const resetSimulation = useCallback(async () => {
-    if (!session) return;
+    if (!session || actionPending) return;
+    setActionPending('reset');
     const runId = session.id;
     const scenario = session.config?.scenario ?? 'period_5d';
-
-    // El reporte se pide ANTES de detener: una vez que el backend libera la
-    // sesión, /reports/summary deja de responder (mismo motivo por el que
-    // COLLAPSE_DETECTED lo pide apenas detecta el colapso, no después).
-    const report = await simulationService.getSummaryReport(runId).catch(() => null);
-
     try {
-      await simulationService.stop(runId);
-    } catch {
-      // Seguimos igual: si stop() falla probablemente la sesión ya había
-      // terminado sola justo antes de este click — no debe impedir mostrar
-      // el reporte que sí logramos traer.
-    }
+      // El reporte se pide ANTES de detener: una vez que el backend libera la
+      // sesión, /reports/summary deja de responder (mismo motivo por el que
+      // COLLAPSE_DETECTED lo pide apenas detecta el colapso, no después).
+      const report = await fetchReportWithRetry(runId);
 
-    socketService.disconnect();
-    localStorage.removeItem('simulation_config');
-    clearStoredStartedAt();
-    setSession(null);
-    setEvents([]);
-    setSessionStartedAt(null);
-    setLastSimUpdate(null);
-    if (report) {
-      setCompletionReport({ ...report, __outcome: 'stopped', __sessionId: runId });
-      saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report });
-    } else {
-      setCompletionReport({ error: true, __outcome: 'stopped', __sessionId: runId });
-      saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report: null });
+      try {
+        await simulationService.stop(runId);
+      } catch {
+        // Seguimos igual: si stop() falla probablemente la sesión ya había
+        // terminado sola justo antes de este click — no debe impedir mostrar
+        // el reporte que sí logramos traer.
+      }
+
+      socketService.disconnect();
+      localStorage.removeItem('simulation_config');
+      clearStoredStartedAt();
+      setSession(null);
+      setEvents([]);
+      setSessionStartedAt(null);
+      setLastSimUpdate(null);
+      if (report) {
+        setCompletionReport({ ...report, __outcome: 'stopped', __sessionId: runId });
+        saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report });
+      } else {
+        setCompletionReport({ error: true, __outcome: 'stopped', __sessionId: runId });
+        saveRun({ id: runId, endedAt: Date.now(), scenario, outcome: 'stopped', report: null });
+      }
+      addToast('Simulación detenida', 'info');
+    } finally {
+      setActionPending(null);
     }
-    addToast('Simulación detenida', 'info');
-  }, [session, addToast]);
+  }, [session, addToast, actionPending]);
 
   const injectFault = useCallback(async (_type: string, _locationId: string) => {
     addToast('Inyección de fallos no disponible en esta versión del backend', 'warning');
@@ -649,13 +728,14 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     collapseResult,
     clearCollapseResult,
     dashboardMetrics,
+    actionPending,
     checkForExistingSession,
     createSession,
     startSimulation,
     pauseSimulation,
     resetSimulation,
     injectFault,
-  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, collapseResult, clearCollapseResult, dashboardMetrics, checkForExistingSession, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
+  }), [session, events, isLoading, error, restoredFlights, clearRestoredFlights, sessionStartedAt, lastSimUpdate, completionReport, clearCompletionReport, collapseResult, clearCollapseResult, dashboardMetrics, actionPending, checkForExistingSession, createSession, startSimulation, pauseSimulation, resetSimulation, injectFault]);
 
   return (
     <SimulationContext.Provider value={value}>

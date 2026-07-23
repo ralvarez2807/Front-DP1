@@ -34,7 +34,11 @@ const LEG_META: Record<string, { label: string; dot: string }> = {
 const MAX_ROWS = 200;
 
 interface Props {
-  sessionId: string;
+  // Si se omite, consulta GET /simulations/mine/result — la última solución
+  // exitosa de la CUENTA (sin TTL), usada desde la pantalla de configuración
+  // antes de arrancar una simulación nueva, cuando ya no hay un sessionId de
+  // la corrida anterior a mano (o su TTL de 5 min ya expiró).
+  sessionId?: string;
   onClose: () => void;
 }
 
@@ -49,7 +53,10 @@ export function LastSolutionModal({ sessionId, onClose }: Props) {
     setLoading(true);
     setError(false);
     setResult(null);
-    simulationService.getResult(sessionId, ctrl.signal)
+    const fetchResult = sessionId
+      ? simulationService.getResult(sessionId, ctrl.signal)
+      : simulationService.getMyResult(ctrl.signal);
+    fetchResult
       .then(r => setResult(r))
       .catch((err: any) => {
         // Una petición cancelada (p. ej. el doble efecto de StrictMode en dev,
@@ -73,7 +80,9 @@ export function LastSolutionModal({ sessionId, onClose }: Props) {
           </div>
           <div className="flex-1">
             <h3 className="text-base font-black text-white">Última solución exitosa</h3>
-            <p className="text-slate-300 text-[11px] font-semibold">Última planificación estable con rutas asignadas</p>
+            <p className="text-slate-300 text-[11px] font-semibold">
+              {sessionId ? 'Última planificación estable con rutas asignadas' : 'Última simulación corrida con esta cuenta'}
+            </p>
           </div>
           <button onClick={onClose} className="text-slate-300 hover:text-white shrink-0">
             <X className="w-5 h-5" />
@@ -88,7 +97,9 @@ export function LastSolutionModal({ sessionId, onClose }: Props) {
           )}
           {error && (
             <p className="text-sm text-rose-500 text-center py-6">
-              No se pudo obtener la última solución (puede que ya haya expirado — TTL de 5 minutos).
+              {sessionId
+                ? 'No se pudo obtener la última solución (puede que ya haya expirado — TTL de 5 minutos).'
+                : 'Todavía no corriste ninguna simulación con esta cuenta.'}
             </p>
           )}
           {result && (() => {

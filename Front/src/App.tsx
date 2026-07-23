@@ -40,6 +40,7 @@ function AppContent() {
     session, lastSimUpdate, completionReport, clearCompletionReport, dashboardMetrics,
     collapseResult, clearCollapseResult, checkForExistingSession,
     startSimulation, pauseSimulation, resetSimulation, isLoading, sessionStartedAt,
+    actionPending,
   } = useSimulationContext();
   const {
     metrics: opsMetrics, activeFlightCount, connected: opsConnected, totalOrders,
@@ -310,17 +311,17 @@ function AppContent() {
                     <div className="flex gap-1 shrink-0">
                       <button
                         onClick={simRunning ? pauseSimulation : startSimulation}
-                        disabled={session.status === 'starting' || isLoading}
+                        disabled={session.status === 'starting' || isLoading || actionPending !== null}
                         className={cn(
                           'px-2.5 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1 transition-all',
-                          session.status === 'starting'
+                          session.status === 'starting' || actionPending !== null
                             ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                             : simRunning
                               ? 'bg-amber-500 hover:bg-amber-400 text-white'
                               : 'bg-emerald-500 hover:bg-emerald-400 text-white'
                         )}
                       >
-                        {session.status === 'starting'
+                        {session.status === 'starting' || actionPending === 'pause' || actionPending === 'start'
                           ? <span className="w-3 h-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
                           : simRunning
                             ? <><Pause className="w-3.5 h-3.5" />Pausar</>
@@ -329,10 +330,19 @@ function AppContent() {
                       </button>
                       <button
                         onClick={resetSimulation}
-                        className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 transition-all"
+                        disabled={actionPending !== null}
+                        className={cn(
+                          'px-2 py-1.5 rounded-lg border transition-all flex items-center justify-center',
+                          actionPending !== null
+                            ? 'bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed'
+                            : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-600'
+                        )}
                         title="Detener simulación"
                       >
-                        <RotateCcw className="w-3.5 h-3.5" />
+                        {actionPending === 'reset'
+                          ? <span className="w-3.5 h-3.5 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
+                          : <RotateCcw className="w-3.5 h-3.5" />
+                        }
                       </button>
                     </div>
                     {dashboardMetrics && (
