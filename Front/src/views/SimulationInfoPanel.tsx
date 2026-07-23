@@ -852,7 +852,7 @@ export const SimulationInfoPanel: React.FC<Props> = ({
   }, [airports, apQuery, apRegion, apOcc, apSort, apDir]);
 
   // ── Vuelos filtrados y ordenados ─────────────────────────────────────────────
-  // "En vuelo" siempre primero; dentro de cada grupo, el criterio elegido por el usuario.
+  // Manda el criterio elegido por el usuario; el estado solo desempata (en vuelo arriba).
   const STATUS_RANK: Record<string, number> = { DEPARTED: 0, SCHEDULED: 1, ARRIVED: 2, CANCELLED: 3 };
   const filteredFlights = useMemo(() => {
     const q = flQuery.trim().toUpperCase();
@@ -877,23 +877,36 @@ export const SimulationInfoPanel: React.FC<Props> = ({
     });
 
     return filtered.sort((a, b) => {
-      // Primero: estado (En vuelo siempre arriba)
+      // Primero: el criterio elegido por el usuario (con sentido asc/desc).
+      // Antes el estado era la clave primaria y esto quedaba como desempate, así que
+      // "Ordenar: Carga" solo ordenaba dentro de cada grupo de estado: la lista salía
+      // agrupada (en vuelo → programados → aterrizados) y los vuelos más cargados no
+      // subían a la cima. Un selector "Ordenar: X" tiene que ordenar por X.
+      const mul = flDir === 'asc' ? 1 : -1;
+      let diff: number;
+      switch (flSort) {
+        case 'arr':
+          diff = new Date(a.arrTime).getTime() - new Date(b.arrTime).getTime();
+          break;
+        case 'load':
+          diff = a.occupancyPct - b.occupancyPct;
+          break;
+        case 'dep':
+        default:
+          diff = new Date(a.depTime).getTime() - new Date(b.depTime).getTime();
+          break;
+      }
+      if (diff !== 0) return mul * diff;
+
+      // Desempate: estado (en vuelo arriba) y luego salida. Importa sobre todo al
+      // ordenar por carga, donde muchos vuelos futuros empatan en 0 % y sin esto
+      // quedarían en un orden arbitrario.
       const effA = effectiveStatus(a, currentSimMs, activeFlightIds);
       const effB = effectiveStatus(b, currentSimMs, activeFlightIds);
       const statusDiff = (STATUS_RANK[effA] ?? 3) - (STATUS_RANK[effB] ?? 3);
       if (statusDiff !== 0) return statusDiff;
 
-      // Segundo: criterio elegido por el usuario (con sentido asc/desc)
-      const mul = flDir === 'asc' ? 1 : -1;
-      switch (flSort) {
-        case 'arr':
-          return mul * (new Date(a.arrTime).getTime() - new Date(b.arrTime).getTime());
-        case 'load':
-          return mul * (a.occupancyPct - b.occupancyPct);
-        case 'dep':
-        default:
-          return mul * (new Date(a.depTime).getTime() - new Date(b.depTime).getTime());
-      }
+      return new Date(a.depTime).getTime() - new Date(b.depTime).getTime();
     });
   }, [flights, flQuery, flOrigin, flDest, flStatus, flLoad, flSort, flDir, currentSimMs, activeFlightIds, icaoMeta]);
 
