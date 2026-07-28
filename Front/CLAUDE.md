@@ -505,8 +505,8 @@ primero si ese endpoint ya existe en el backend.
   "ICAO o ciudad" también matchea nombre de ciudad, y se agregaron continente y rango de fechas
   del deadline (interpretadas en la zona del usuario). Todo client-side (no hay query params en
   el plan del backend).
-- **Duración 3/5/7 días (LE-69):** selector en el panel de configuración. `speedFactor = días×16`
-  (3→48, 5→80 histórico, 7→112) para que toda corrida dure ~90 min reales (LE-73).
+- **Duración 3/5/7 días (LE-69):** selector en el panel de configuración. `speedFactor = días×48`
+  (3→144, 5→240, 7→336) para que toda corrida dure ~30 min reales (LE-73).
 - **Reportes de cierre (G08–G10):** el modal "Simulación Completada" ahora usa los campos REALES
   de `/reports/summary` vía `ReportRows` (antes leía `deliveredBaggage` etc., que no existen, y
   mostraba "—"). El modal de colapso agrega la última planificación estable (fetch best-effort al

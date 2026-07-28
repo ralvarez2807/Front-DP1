@@ -237,7 +237,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
   };
 }
 
-const SPEED_FACTOR = 120.0; // 5 días × 24h / 1h real = 120
+const SPEED_FACTOR = 240.0; // 5 días × 48 = 240 (corrida de 5d en ~30 min reales)
 const COLLAPSE_SPEED_FACTOR = 600.0; // colapso: rango de fechas muy amplio, hay que acelerar más
 
 export const simulationService = {
@@ -248,8 +248,8 @@ export const simulationService = {
     signal?: AbortSignal
   ): Promise<SimulationSession> => {
     // LE-69/LE-73: la duración es elegible (3/5/7 días) pero la corrida completa
-    // toma siempre ~60 min reales — speedFactor proporcional a los días simulados
-    // (3→72, 5→120, 7→168).
+    // toma siempre ~30 min reales — speedFactor proporcional a los días simulados
+    // (3→144, 5→240, 7→336).
     const rangeDays = Math.max(1, Math.round(
       (new Date(simEnd).getTime() - new Date(simStart).getTime()) / 86_400_000
     ));
@@ -259,7 +259,7 @@ export const simulationService = {
       optimizerMode:    'ALNS_ONLY',
       simStart,
       simEnd,
-      speedFactor:      config.scenario === SCENARIOS.COLLAPSE ? COLLAPSE_SPEED_FACTOR : rangeDays * 24,
+      speedFactor:      config.scenario === SCENARIOS.COLLAPSE ? COLLAPSE_SPEED_FACTOR : rangeDays * 48,
       // Todos los escenarios detectan colapso; la diferencia del escenario COLLAPSE
       // es únicamente el rango de fechas (ver computeDateRange), tan amplio que
       // permite observar el colapso real en vez de cortar la simulación antes.
