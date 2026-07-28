@@ -323,6 +323,21 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
   // ── Carga real de vuelos (polling) ──────────────────────────────────────
   const fetchFlightLoadsRef = useRef<(() => Promise<void>) | null>(null);
+  // Disparadores manuales (FLIGHT_DEPARTED, BAGGAGE_ASSIGNED, ver más abajo)
+  // piden un refresh anticipado sin esperar el ciclo de 8s. En colapso, con
+  // muchos despegues/asignaciones por segundo real, cada evento agendaba su
+  // propio setTimeout independiente — un aluvión de peticiones paralelas a
+  // /flights (la causa real de ERR_INSUFFICIENT_RESOURCES incluso con el
+  // ciclo regular ya arreglado). Se agrupan en un único refresh pendiente:
+  // si ya hay uno agendado, los eventos siguientes no agendan otro.
+  const flightRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestFlightRefresh = useCallback((delayMs: number) => {
+    if (flightRefreshTimerRef.current !== null) return;
+    flightRefreshTimerRef.current = setTimeout(() => {
+      flightRefreshTimerRef.current = null;
+      fetchFlightLoadsRef.current?.();
+    }, delayMs);
+  }, []);
   useEffect(() => {
     if (!session?.id) { fetchFlightLoadsRef.current = null; setSimFlightList([]); return; }
     const sessionId = session.id;
@@ -386,7 +401,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
 
     fetchFlightLoadsRef.current = fetchFlightLoads;
     fetchFlightLoads();
-    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); fetchFlightLoadsRef.current = null; };
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+      if (flightRefreshTimerRef.current !== null) { clearTimeout(flightRefreshTimerRef.current); flightRefreshTimerRef.current = null; }
+      fetchFlightLoadsRef.current = null;
+    };
   }, [session?.id]);
 
   // ── Rutas deduplicadas — clave canónica para que A→B y B→A usen la misma línea
@@ -627,7 +647,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const occupied = payload.load ?? payload.occupiedCapacity ?? payload.currentLoad ?? payload.loadedPackages ?? 0;
       console.debug(`[SimMap] FLIGHT_DEPARTED carga WS: load=${payload.load} capacity=${payload.capacity} → occupied=${occupied}`);
       if (occupied === 0 || capacity === 0) {
-        setTimeout(() => fetchFlightLoadsRef.current?.(), 2_000);
+        requestFlightRefresh(2_000);
       }
 
       // Limpiar timer anterior si existe
@@ -746,7 +766,7 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     // Disparar un refresh rápido de la lista de vuelos para que la columna CARGA
     // refleje la nueva carga sin esperar el intervalo de 8s del polling regular.
     const unsubBagAssigned = socket.on('BAGGAGE_ASSIGNED', () => {
-      setTimeout(() => fetchFlightLoadsRef.current?.(), 800);
+      requestFlightRefresh(800);
     });
 
     // FLIGHT_CANCELLED: quitar el avión si estaba en el aire y hacer parpadear la
