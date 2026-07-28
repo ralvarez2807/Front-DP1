@@ -251,23 +251,29 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { setSimAirportList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
-    let id: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Se reprograma a sí misma DESPUÉS de terminar (setTimeout), no con
+    // setInterval a ciegas — si una respuesta tarda más que el intervalo,
+    // setInterval dispara la siguiente igual, apilando peticiones al mismo
+    // endpoint sin límite hasta agotar el cupo de conexiones del navegador
+    // (ERR_INSUFFICIENT_RESOURCES). Así nunca hay dos en vuelo a la vez.
     const fetchLoads = async () => {
+      let deadSession = false;
       try {
         const airports = await simulationService.getSimAirports(sessionId);
         if (cancelled) return;
         setSimAirportList(airports);
       } catch (e: any) {
         // Sesión muerta (backend ya la liberó del registry): cortar el polling
-        // en vez de seguir pegándole a un 404 cada 8s indefinidamente.
-        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+        // en vez de seguir pegándole a un 404 para siempre.
+        if (e?.statusCode === 404) deadSession = true;
       }
+      if (!cancelled && !deadSession) timer = setTimeout(fetchLoads, 8_000);
     };
 
     fetchLoads();
-    id = setInterval(fetchLoads, 8_000);
-    return () => { cancelled = true; if (id !== null) clearInterval(id); };
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
   }, [session?.id]);
 
   // ── Carga real de envíos/paquetes durante la simulación ───────────────────
@@ -275,21 +281,25 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { setSimShipmentList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
-    let id: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Ver comentario del poller de aeropuertos: se reprograma tras terminar,
+    // no con setInterval a ciegas, para no apilar peticiones si el backend
+    // responde más lento que el intervalo.
     const fetchShipments = async () => {
+      let deadSession = false;
       try {
         const shipments = await simulationService.getSimShipments(sessionId);
         if (cancelled) return;
         setSimShipmentList(shipments);
       } catch (e: any) {
-        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+        if (e?.statusCode === 404) deadSession = true;
       }
+      if (!cancelled && !deadSession) timer = setTimeout(fetchShipments, 10_000);
     };
 
     fetchShipments();
-    id = setInterval(fetchShipments, 10_000);
-    return () => { cancelled = true; if (id !== null) clearInterval(id); };
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
   }, [session?.id]);
 
   // ── Cache de duraciones y depTimes reales de vuelo ──────────────────────────
@@ -317,9 +327,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
     if (!session?.id) { fetchFlightLoadsRef.current = null; setSimFlightList([]); return; }
     const sessionId = session.id;
     let cancelled = false;
-    let id: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
+    // Ver comentario del poller de aeropuertos: se reprograma tras terminar,
+    // no con setInterval a ciegas. Este es el más propenso a acumularse —
+    // /flights es la respuesta más pesada en colapso (30 días simulados) y la
+    // primera en tardar más que el intervalo a medida que avanza la corrida.
     const fetchFlightLoads = async () => {
+      let deadSession = false;
       try {
         const flights = await simulationService.getSimFlights(sessionId);
         if (cancelled) return;
@@ -337,6 +352,23 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
             if (depMs) flightDepMsRef.current.set(f.flightId, depMs);
           }
         });
+        // Poda de respaldo: la limpieza "normal" ocurre por evento WS
+        // (FLIGHT_DEPARTED/ARRIVED/CANCELLED, ver esos handlers), pero si el WS
+        // está caído esos eventos no llegan y este Map seguiría creciendo (este
+        // poll es HTTP normal, sigue corriendo aunque el WS no conecte). Como
+        // respaldo, purga entradas cuyo vuelo debió partir hace varias sim-horas
+        // y no está en el aire — no depende del WS para nada.
+        const nowSimMs = currentSimMsRef.current;
+        if (nowSimMs !== null) {
+          const STALE_WINDOW_MS = 6 * 3_600_000; // margen amplio: no es un caso fino
+          const flyingIds = new Set(activePlanesRef.current.map(p => p.flightId));
+          flightDepMsRef.current.forEach((depMs, fid) => {
+            if (!flyingIds.has(fid) && nowSimMs - depMs > STALE_WINDOW_MS) {
+              flightDepMsRef.current.delete(fid);
+              flightDurationsRef.current.delete(fid);
+            }
+          });
+        }
         // Actualizar carga en aviones activos
         setActivePlanes(prev => prev.map(p => {
           const live = flights.find(f => f.flightId === p.flightId)
@@ -347,14 +379,14 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           return { ...p, capacity: live.capacity, occupied: live.load, ...(cachedDuration ? { durationMs: cachedDuration } : {}) };
         }));
       } catch (e: any) {
-        if (e?.statusCode === 404 && id !== null) { clearInterval(id); id = null; }
+        if (e?.statusCode === 404) deadSession = true;
       }
+      if (!cancelled && !deadSession) timer = setTimeout(fetchFlightLoads, 8_000);
     };
 
     fetchFlightLoadsRef.current = fetchFlightLoads;
     fetchFlightLoads();
-    id = setInterval(fetchFlightLoads, 8_000);
-    return () => { cancelled = true; if (id !== null) clearInterval(id); fetchFlightLoadsRef.current = null; };
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); fetchFlightLoadsRef.current = null; };
   }, [session?.id]);
 
   // ── Rutas deduplicadas — clave canónica para que A→B y B→A usen la misma línea
@@ -584,6 +616,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const durationMs = cachedDuration
         ?? Math.max(MIN_PLANE_ANIM_MS, Math.round(fallbackSimHours * 3_600_000 / simSpeedRef.current));
 
+      // Ya se usó la caché para este vuelo (arriba) — la duración real ahora vive
+      // en el objeto del avión (`durationMs`), nadie vuelve a leer esta entrada.
+      flightDepMsRef.current.delete(fid);
+      flightDurationsRef.current.delete(fid);
+
       console.debug(`[SimMap] FLIGHT_DEPARTED: ${fromIcao}→${toIcao} | cached=${!!cachedDuration} durationMs=${durationMs}`);
 
       const capacity = payload.capacity ?? payload.maxCapacity ?? 0;
@@ -631,6 +668,10 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const fid = payload?.flightId ?? payload?.id;
       if (!fid) return;
       const arrivedLoad = payload?.load ?? payload?.occupiedCapacity ?? undefined;
+      // Ya aterrizó — si por lo que sea la caché de duración seguía viva para
+      // este vuelo (FLIGHT_DEPARTED no la habrá visto), ya no hace falta.
+      flightDepMsRef.current.delete(fid);
+      flightDurationsRef.current.delete(fid);
 
       // Buscar la key del avión para cancelar su timer de seguridad
       setActivePlanes(prev => {
@@ -720,6 +761,11 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
       const fromIcao = payload?.fromIcao ?? parts[0];
       const toIcao   = payload?.toIcao   ?? parts[1];
       if (!fromIcao || !toIcao) return;
+
+      // Cancelado: si nunca llegó a despegar, la caché de duración quedaría
+      // huérfana para siempre (FLIGHT_DEPARTED, que la borra, no va a llegar).
+      flightDepMsRef.current.delete(fid);
+      flightDurationsRef.current.delete(fid);
 
       setActivePlanes(prev => prev.filter(p => p.flightId !== fid));
       setSeenFlights(prev => prev.map(f => f.flightId === fid ? { ...f, isActive: false } : f));
