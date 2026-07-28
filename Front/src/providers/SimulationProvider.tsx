@@ -438,6 +438,15 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const startTimeAtIso = session.startTimeAt;
     const speedFactor    = session.speedFactor;
 
+    // poll() se reprograma a sí mismo con setTimeout al terminar, no con
+    // setInterval a ciegas — con setInterval, si getSession() empieza a
+    // tardar más que el intervalo (backend saturado, misma causa que el
+    // ERR_INSUFFICIENT_RESOURCES visto en los pollers del mapa), las
+    // peticiones se apilan sin límite y este poll de respaldo puede quedar
+    // tan atascado que nunca llega a detectar que la sesión ya colapsó/terminó.
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     // Limpieza local de la sesión (idéntica al cierre por WS).
     const teardown = () => {
       socketService.disconnect();
@@ -482,6 +491,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     };
 
     const poll = async () => {
+      let shouldContinue = true;
       try {
         const updated = await simulationService.getSession(sessionId, config);
 
@@ -504,6 +514,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             });
           }
           teardown();
+          shouldContinue = false;
           if (updated.status === 'collapsed') {
             simulationService.getResult(sessionId)
               .then(r => showCollapse(r.collapseReason))
@@ -514,46 +525,52 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
               'info'
             );
           }
-          return;
-        }
-
-        setSession(prev => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            currentTimeAt: Math.max(prev.currentTimeAt, updated.currentTimeAt),
-            status: updated.status,
-          };
-        });
-      } catch (e: any) {
-        if (e?.statusCode !== 404) return;
-
-        // 404 = la sesión ya no está en el registry porque TERMINÓ (el backend la
-        // elimina al finalizar/colapsar). Su estado final (incl. el flag de colapso)
-        // sigue disponible en GET /result durante ~5 min: lo consultamos para mostrar
-        // el reporte de colapso en vez del aviso genérico. Es la red de seguridad por
-        // si el evento WS COLLAPSE_DETECTED no llegó a procesarse antes del cierre.
-        let finalResult: SimulationResult | null = null;
-        try {
-          finalResult = await simulationService.getResult(sessionId);
-        } catch { /* /result también expiró o el id nunca existió */ }
-
-        teardown();
-
-        if (finalResult?.status === 'COLLAPSED') {
-          showCollapse(finalResult.collapseReason);
-        } else if (finalResult?.status === 'COMPLETED' || finalResult?.status === 'STOPPED') {
-          const outcome = finalResult.status.toLowerCase() as 'completed' | 'stopped';
-          const scenario = config?.scenario ?? 'period_5d';
-          simulationService.getSummaryReport(sessionId)
-            .then(report => {
-              setCompletionReport({ ...report, __outcome: outcome, __sessionId: sessionId });
-              saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
-            })
-            .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
         } else {
-          addToast('La sesión ya no existe en el servidor', 'warning');
+          setSession(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              currentTimeAt: Math.max(prev.currentTimeAt, updated.currentTimeAt),
+              status: updated.status,
+            };
+          });
         }
+      } catch (e: any) {
+        if (e?.statusCode === 404) {
+          // 404 = la sesión ya no está en el registry porque TERMINÓ (el backend la
+          // elimina al finalizar/colapsar). Su estado final (incl. el flag de colapso)
+          // sigue disponible en GET /result durante ~5 min: lo consultamos para mostrar
+          // el reporte de colapso en vez del aviso genérico. Es la red de seguridad por
+          // si el evento WS COLLAPSE_DETECTED no llegó a procesarse antes del cierre.
+          let finalResult: SimulationResult | null = null;
+          try {
+            finalResult = await simulationService.getResult(sessionId);
+          } catch { /* /result también expiró o el id nunca existió */ }
+
+          teardown();
+          shouldContinue = false;
+
+          if (finalResult?.status === 'COLLAPSED') {
+            showCollapse(finalResult.collapseReason);
+          } else if (finalResult?.status === 'COMPLETED' || finalResult?.status === 'STOPPED') {
+            const outcome = finalResult.status.toLowerCase() as 'completed' | 'stopped';
+            const scenario = config?.scenario ?? 'period_5d';
+            simulationService.getSummaryReport(sessionId)
+              .then(report => {
+                setCompletionReport({ ...report, __outcome: outcome, __sessionId: sessionId });
+                saveRun({ id: sessionId, endedAt: Date.now(), scenario, outcome, report });
+              })
+              .catch(() => setCompletionReport({ error: true, __outcome: outcome, __sessionId: sessionId }));
+          } else {
+            addToast('La sesión ya no existe en el servidor', 'warning');
+          }
+        }
+        // Error transitorio (red, timeout, etc.): no se hace nada especial,
+        // se reintenta en el próximo ciclo (shouldContinue sigue en true).
+      }
+      if (!cancelled && shouldContinue) {
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(poll, 4_000);
       }
     };
 
@@ -571,18 +588,22 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const onRegainFocus = () => {
       if (document.visibilityState === 'hidden') return;
       socketService.forceReconnect(sessionId);
+      // Cancela el ciclo autoprogramado pendiente y fuerza un chequeo ya —
+      // evita que quede un timer viejo corriendo en paralelo con este poll.
+      if (timer !== null) { clearTimeout(timer); timer = null; }
       poll();
     };
     document.addEventListener('visibilitychange', onRegainFocus);
     window.addEventListener('focus', onRegainFocus);
 
-    // Llamada inmediata: sin esto, setInterval espera 4s para el primer chequeo,
-    // y si algo recrea este efecto antes de ese primer tick (p. ej. session?.status
-    // cambia por otra vía) el poll de respaldo podía no llegar a ejecutarse NUNCA.
+    // Llamada inmediata: sin esto, el primer chequeo esperaría 4s, y si algo
+    // recrea este efecto antes de ese primer tick (p. ej. session?.status
+    // cambia por otra vía) el poll de respaldo podía no llegar a ejecutarse
+    // NUNCA. poll() se autoreprograma después de esta primera llamada.
     poll();
-    const id = setInterval(poll, 4_000);
     return () => {
-      clearInterval(id);
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
       document.removeEventListener('visibilitychange', onRegainFocus);
       window.removeEventListener('focus', onRegainFocus);
     };

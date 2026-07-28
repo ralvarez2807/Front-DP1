@@ -238,7 +238,7 @@ function mapSession(data: any, config: { scenario: SimulationScenario; speed: nu
 }
 
 const SPEED_FACTOR = 120.0; // 5 días × 24h / 1h real = 120
-const COLLAPSE_SPEED_FACTOR = 1000.0; // colapso: rango de fechas muy amplio, hay que acelerar más
+const COLLAPSE_SPEED_FACTOR = 600.0; // colapso: rango de fechas muy amplio, hay que acelerar más
 
 export const simulationService = {
   createSession: async (
