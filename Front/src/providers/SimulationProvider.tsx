@@ -265,26 +265,59 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   useEffect(() => { checkForExistingSession(); }, [checkForExistingSession]);
 
+  // Estos 10 tipos de evento son los más frecuentes del WS (cada despegue,
+  // cada maleta) — en colapso, con speedFactor alto, pueden llegar decenas
+  // por segundo real. Antes cada mensaje individual disparaba 3 setState
+  // (setLastSimUpdate + setSession + setEvents), saturando el hilo principal
+  // del navegador. COLLAPSE_DETECTED/SIMULATION_ENDED se procesan en otros
+  // listeners aparte (no se tocan acá, siguen siendo instantáneos) — pero
+  // quedaban atrás en la cola de renders de este aluvión, así que el frontend
+  // podía tardar mucho (o directamente no llegar nunca, si el aluvión no
+  // cesaba) en enterarse de que la sesión ya había colapsado/terminado.
+  // Se agrupan los mensajes en un buffer y se vuelcan a React como mucho una
+  // vez por frame (requestAnimationFrame) en vez de una vez por mensaje.
   useEffect(() => {
+    let pendingEvents: OperationalEvent[] = [];
+    let pendingSimUpdate: { simMs: number; realMs: number } | null = null;
+    let rafId: number | null = null;
+
+    const flush = () => {
+      rafId = null;
+      if (pendingSimUpdate) {
+        const simUpdate = pendingSimUpdate;
+        pendingSimUpdate = null;
+        setLastSimUpdate(simUpdate);
+        setSession(prev => {
+          if (!prev) return prev;
+          const startMs = new Date(prev.startTimeAt).getTime();
+          const hoursElapsed = Math.max(0, Math.round((simUpdate.simMs - startMs) / 3_600_000));
+          return { ...prev, currentTimeAt: hoursElapsed };
+        });
+      }
+      if (pendingEvents.length > 0) {
+        const batch = pendingEvents;
+        pendingEvents = [];
+        setEvents(prev => [...batch.slice(-50).reverse(), ...prev].slice(0, 50));
+      }
+    };
+
+    const scheduleFlush = () => {
+      if (rafId === null) rafId = requestAnimationFrame(flush);
+    };
+
     const unsubs = BACKEND_EVENTS.map(eventType =>
       socket.on(eventType, ({ simTime, payload }: { simTime?: string; payload: any }) => {
         if (simTime) {
-          setLastSimUpdate({ simMs: new Date(simTime).getTime(), realMs: Date.now() });
+          pendingSimUpdate = { simMs: new Date(simTime).getTime(), realMs: Date.now() };
         }
-        setSession(prev => {
-          if (!prev || !simTime) return prev;
-          const startMs = new Date(prev.startTimeAt).getTime();
-          const simMs = new Date(simTime).getTime();
-          const hoursElapsed = Math.max(0, Math.round((simMs - startMs) / 3_600_000));
-          return { ...prev, currentTimeAt: hoursElapsed };
-        });
-        setEvents(prev => [
-          toOperationalEvent(eventType, payload, simTime),
-          ...prev.slice(0, 49),
-        ]);
+        pendingEvents.push(toOperationalEvent(eventType, payload, simTime));
+        scheduleFlush();
       })
     );
-    return () => unsubs.forEach(u => u());
+    return () => {
+      unsubs.forEach(u => u());
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [socket]);
 
   // ── SIMULATION_ENDED: cierre autoritativo de la sesión por WS ────────────
