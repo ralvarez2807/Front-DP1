@@ -7,16 +7,16 @@ export function scheduleIdOf(flightId: string): string {
 
 export function getPlaneColor(occupied: number, capacity: number, highlighted: boolean): string {
   // Violeta para "seleccionado": el dorado/ámbar ya lo usa el estado "en alerta"
-  // (70-90% de carga) y con varios aviones ámbar en pantalla se confundían.
+  // (50-70% de carga) y con varios aviones ámbar en pantalla se confundían.
   if (highlighted) return '#8b5cf6';
   if (capacity === 0) return '#2563eb';        // sin dato de capacidad
   if (occupied <= 0) return '#94a3b8';         // plomo: el avión viaja vacío
   const pct = (occupied / capacity) * 100;
-  // Umbrales alineados con la ocupación del resto de la UI (occColor: 85/60).
+  // Umbrales alineados con la ocupación del resto de la UI (occColor: 70/50).
   // Rojo más oscuro que el de rutas/hubs (#ef4444): a este tamaño de ícono, el
   // mismo tono se perdía contra las líneas de ruta activas del mismo color.
-  if (pct >= 85) return '#b91c1c';
-  if (pct >= 60) return '#f59e0b';
+  if (pct >= 70) return '#b91c1c';
+  if (pct >= 50) return '#f59e0b';
   return '#10b981';
 }
 

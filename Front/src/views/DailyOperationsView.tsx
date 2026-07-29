@@ -38,14 +38,14 @@ function toSimAirport(a: {
   icao: string; city: string; continent: string; load: number; capacity: number;
 }): SimAirport {
   const pct = a.capacity > 0 ? (a.load / a.capacity) * 100 : 0;
-  const level = a.load === 0 ? 'EMPTY' : pct >= 90 ? 'RED' : pct >= 70 ? 'AMBER' : 'GREEN';
+  const level = a.load === 0 ? 'EMPTY' : pct >= 70 ? 'RED' : pct >= 50 ? 'AMBER' : 'GREEN';
   return { icao: a.icao, city: a.city, continent: a.continent, load: a.load, capacity: a.capacity, occupancyPct: pct, occupancyLevel: level };
 }
 
 // ── Conversor: OpsPlane → SimFlight ────────────────────────────────────────
 function toSimFlight(p: OpsPlane): SimFlight {
   const pct = p.capacity > 0 ? (p.occupied / p.capacity) * 100 : 0;
-  const level = pct >= 90 ? 'RED' : pct >= 70 ? 'AMBER' : 'GREEN';
+  const level = pct >= 70 ? 'RED' : pct >= 50 ? 'AMBER' : 'GREEN';
   return {
     flightId: p.flightId,
     fromIcao: p.fromIcao,
@@ -605,7 +605,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
 
   // Color de hub por ocupación
   const hubColor = (pct: number, empty: boolean) =>
-    empty ? '#94a3b8' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+    empty ? '#94a3b8' : pct >= 70 ? '#ef4444' : pct >= 50 ? '#f59e0b' : '#10b981';
 
   // Encuadra la cámara para que entren todos los aeropuertos dados.
   const fitToHubs = useCallback((icaos: string[]) => {
@@ -1039,8 +1039,8 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
           const tooltipLoad = opsAp?.load ?? hub.currentStorage;
           const tooltipCap  = opsAp?.capacity ?? hub.storageCapacity;
           const pct = tooltipCap > 0 ? Math.round((tooltipLoad / tooltipCap) * 100) : 0;
-          const statusColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : tooltipLoad === 0 ? '#94a3b8' : '#10b981';
-          const statusLabel = pct >= 90 ? 'Crítico' : pct >= 70 ? 'En alerta' : tooltipLoad === 0 ? 'Vacío' : 'Óptimo';
+          const statusColor = pct >= 70 ? '#ef4444' : pct >= 50 ? '#f59e0b' : tooltipLoad === 0 ? '#94a3b8' : '#10b981';
+          const statusLabel = pct >= 70 ? 'Crítico' : pct >= 50 ? 'En alerta' : tooltipLoad === 0 ? 'Vacío' : 'Óptimo';
           const activeCount = planes.filter(p => p.fromIcao === hub.id || p.toIcao === hub.id).length;
           const containerRect = svgRef.current?.parentElement?.getBoundingClientRect();
           if (!containerRect) return null;
@@ -1106,9 +1106,7 @@ export const DailyOperationsView: React.FC<DailyOperationsViewProps> = React.mem
           if (!p) return null;
           const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
           // Color y etiqueta derivados de la MISMA fuente que el ícono del avión y
-          // que el filtro "Aviones" del panel (umbrales 85/60). Antes este tooltip
-          // usaba 90/70 por su cuenta, así que un avión podía decir "Normal" y aun
-          // así desaparecer al destildar "Casi lleno (>60%)".
+          // que el filtro "Aviones" del panel (umbrales 70/50).
           const bucket = planeColorBucket(p.occupied, p.capacity);
           const loadColor = getPlaneColor(p.occupied, p.capacity, false);
           const loadLabel = bucket === 'empty' ? (p.capacity === 0 ? 'Sin datos' : 'Vacío / sin carga')

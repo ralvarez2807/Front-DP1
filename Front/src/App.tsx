@@ -766,20 +766,20 @@ const COLOR_MAP: Record<MetricColor, string> = {
 };
 
 // ── Semáforo de los indicadores globales LE-101/LE-102 (G01–G04) ─────────────
-// Umbrales alineados con el occupancyLevel del backend: EMPTY = 0 %, GREEN ≤ 60 %,
-// AMBER ≤ 85 %, RED > 85 %. "Vacío" se distingue del verde (pedido del docente).
+// Umbrales alineados con el occupancyLevel del resto de la UI: EMPTY = 0 %, GREEN ≤ 50 %,
+// AMBER ≤ 70 %, RED > 70 %. "Vacío" se distingue del verde (pedido del docente).
 function occupancyVisual(pct: number | null | undefined): { dot: string; text: string; label: string } {
   if (pct == null || isNaN(pct)) return { dot: 'bg-slate-300',   text: 'text-slate-400',   label: 'Sin datos' };
   if (pct <= 0)                  return { dot: 'bg-slate-300',   text: 'text-slate-500',   label: 'Vacío' };
-  if (pct <= 60)                 return { dot: 'bg-emerald-500', text: 'text-emerald-700', label: 'Óptimo' };
-  if (pct <= 85)                 return { dot: 'bg-amber-500',   text: 'text-amber-700',   label: 'Alerta' };
+  if (pct <= 50)                 return { dot: 'bg-emerald-500', text: 'text-emerald-700', label: 'Óptimo' };
+  if (pct <= 70)                 return { dot: 'bg-amber-500',   text: 'text-amber-700',   label: 'Alerta' };
   return                                { dot: 'bg-red-500',     text: 'text-red-600',     label: 'Crítico' };
 }
 
 function occupancyCardColor(pct: number | null | undefined): MetricColor {
   if (pct == null || isNaN(pct) || pct <= 0) return 'slate';
-  if (pct <= 60) return 'emerald';
-  if (pct <= 85) return 'amber';
+  if (pct <= 50) return 'emerald';
+  if (pct <= 70) return 'amber';
   return 'red';
 }
 
@@ -789,7 +789,7 @@ function OccupancyStat({ label, pct, title }: { label: string; pct?: number | nu
     <div className="flex flex-col leading-tight px-1 shrink-0" title={title ? `${title} — ${v.label}` : v.label}>
       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-900 whitespace-nowrap">{label}</span>
       <span className={cn('text-sm font-black font-mono leading-tight flex items-center gap-1', v.text)}>
-        <span className={cn('w-2 h-2 rounded-full shrink-0', v.dot, pct != null && pct > 85 && 'animate-pulse')} />
+        <span className={cn('w-2 h-2 rounded-full shrink-0', v.dot, pct != null && pct > 70 && 'animate-pulse')} />
         {pct == null || isNaN(pct) ? '—' : `${pct.toFixed(1)}%`}
       </span>
     </div>

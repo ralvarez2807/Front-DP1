@@ -52,8 +52,8 @@ type LoadState<T> = { status: 'loading' } | { status: 'error' } | { status: 'rea
 
 // ── Helpers de color / estado ────────────────────────────────────────────────
 function occColor(level: string, pct: number): string {
-  if (level === 'RED' || pct >= 85) return '#ef4444';
-  if (level === 'AMBER' || pct >= 60) return '#f59e0b';
+  if (level === 'RED' || pct >= 70) return '#ef4444';
+  if (level === 'AMBER' || pct >= 50) return '#f59e0b';
   if (level === 'EMPTY' || pct === 0) return '#94a3b8';
   return '#10b981';
 }
@@ -836,9 +836,9 @@ export const SimulationInfoPanel: React.FC<Props> = ({
       .filter(a => {
         if (q && !a.icao.toUpperCase().includes(q) && !a.city.toUpperCase().includes(q)) return false;
         if (apRegion && a.continent !== apRegion) return false;
-        if (apOcc === 'high' && a.occupancyPct < 85) return false;
-        if (apOcc === 'mid'  && (a.occupancyPct < 60 || a.occupancyPct >= 85)) return false;
-        if (apOcc === 'low'  && a.occupancyPct >= 60) return false;
+        if (apOcc === 'high' && a.occupancyPct < 70) return false;
+        if (apOcc === 'mid'  && (a.occupancyPct < 50 || a.occupancyPct >= 70)) return false;
+        if (apOcc === 'low'  && a.occupancyPct >= 50) return false;
         return true;
       })
       .sort((a, b) => {
@@ -870,9 +870,9 @@ export const SimulationInfoPanel: React.FC<Props> = ({
         if (!f.toIcao.toUpperCase().includes(d) && !dCity.includes(d)) return false;
       }
       if (flStatus && eff !== flStatus) return false;
-      if (flLoad === 'high' && f.occupancyPct < 85) return false;
-      if (flLoad === 'mid'  && (f.occupancyPct < 60 || f.occupancyPct >= 85)) return false;
-      if (flLoad === 'low'  && f.occupancyPct >= 60) return false;
+      if (flLoad === 'high' && f.occupancyPct < 70) return false;
+      if (flLoad === 'mid'  && (f.occupancyPct < 50 || f.occupancyPct >= 70)) return false;
+      if (flLoad === 'low'  && f.occupancyPct >= 50) return false;
       return true;
     });
 
@@ -1055,9 +1055,9 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                   options={[{ value: '', label: 'Región' }, ...regions.map(r => ({ value: r, label: r }))]} />
                 <FilterSelect value={apOcc} onChange={setApOcc} options={[
                   { value: '', label: 'Ocupación' },
-                  { value: 'high', label: 'Crítica (>85%)' },
-                  { value: 'mid',  label: 'Alerta (60-85%)' },
-                  { value: 'low',  label: 'Óptima (<60%)' },
+                  { value: 'high', label: 'Crítica (>70%)' },
+                  { value: 'mid',  label: 'Alerta (50-70%)' },
+                  { value: 'low',  label: 'Óptima (<50%)' },
                 ]} />
                 <FilterSelect value={apSort} onChange={v => setApSort(v as typeof apSort)} options={[
                   { value: 'load',   label: 'Ordenar: Carga' },
@@ -1146,9 +1146,9 @@ export const SimulationInfoPanel: React.FC<Props> = ({
                 ]} />
                 <FilterSelect value={flLoad} onChange={setFlLoad} options={[
                   { value: '', label: 'Carga' },
-                  { value: 'high', label: 'Crítica (>85%)' },
-                  { value: 'mid',  label: 'Media (60-85%)' },
-                  { value: 'low',  label: 'Baja (<60%)' },
+                  { value: 'high', label: 'Crítica (>70%)' },
+                  { value: 'mid',  label: 'Media (50-70%)' },
+                  { value: 'low',  label: 'Baja (<50%)' },
                 ]} />
                 <FilterSelect value={flSort} onChange={v => setFlSort(v as typeof flSort)} options={[
                   { value: 'dep',   label: 'Ordenar: Salida' },

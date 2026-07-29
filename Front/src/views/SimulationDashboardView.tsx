@@ -109,16 +109,16 @@ function mergeSeenFlights(
 
 function getPlaneColor(occupied: number, capacity: number, highlighted: boolean): string {
   // Violeta para "seleccionado": el dorado/ámbar ya lo usa el estado "en alerta"
-  // (70-90% de carga) y con varios aviones ámbar en pantalla se confundían.
+  // (50-70% de carga) y con varios aviones ámbar en pantalla se confundían.
   if (highlighted) return '#8b5cf6';
   if (capacity === 0) return '#2563eb';        // sin dato de capacidad
   if (occupied <= 0) return '#94a3b8';         // plomo: el avión viaja vacío
   const pct = (occupied / capacity) * 100;
-  // Umbrales alineados con la ocupación del resto de la UI (occColor: 85/60).
+  // Umbrales alineados con la ocupación del resto de la UI (occColor: 70/50).
   // Rojo más oscuro que el de rutas/hubs (#ef4444): a este tamaño de ícono, el
   // mismo tono se perdía contra las líneas de ruta activas del mismo color.
-  if (pct >= 85) return '#b91c1c';
-  if (pct >= 60) return '#f59e0b';
+  if (pct >= 70) return '#b91c1c';
+  if (pct >= 50) return '#f59e0b';
   return '#10b981';
 }
 
@@ -1735,8 +1735,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
                 ? '#6366f1'
                 : (selectedFlight && (hub.id === selectedFlight.fromIcao || hub.id === selectedFlight.toIcao))
                   ? '#f59e0b'
-                  : pct >= 90 ? '#ef4444'
-                  : pct >= 70 ? '#f59e0b'
+                  : pct >= 70 ? '#ef4444'
+                  : pct >= 50 ? '#f59e0b'
                   : currentStorage === 0 ? '#94a3b8'   // vacío — gris neutro
                   : '#10b981';                          // óptimo — verde
 
@@ -1848,8 +1848,8 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           const pct = tooltipCapacity > 0
             ? Math.round((tooltipStorage / tooltipCapacity) * 100)
             : 0;
-          const statusColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
-          const statusLabel = pct >= 90 ? 'Crítico' : pct >= 70 ? 'En alerta' : 'Óptimo';
+          const statusColor = pct >= 70 ? '#ef4444' : pct >= 50 ? '#f59e0b' : '#10b981';
+          const statusLabel = pct >= 70 ? 'Crítico' : pct >= 50 ? 'En alerta' : 'Óptimo';
 
           const svg = svgRef.current;
           const rect = svg?.getBoundingClientRect();
@@ -1932,12 +1932,12 @@ export const SimulationDashboardView: React.FC<SimulationDashboardViewProps> = (
           if (!p) return null;
           const pct = p.capacity > 0 ? Math.round((p.occupied / p.capacity) * 100) : 0;
           const loadColor = p.capacity === 0 ? '#2563eb'
-            : pct >= 90 ? '#ef4444'
-            : pct >= 70 ? '#f59e0b'
+            : pct >= 70 ? '#ef4444'
+            : pct >= 50 ? '#f59e0b'
             : '#10b981';
           const loadLabel = p.capacity === 0 ? 'Sin datos'
-            : pct >= 90 ? 'Capacidad crítica'
-            : pct >= 70 ? 'Casi lleno'
+            : pct >= 70 ? 'Capacidad crítica'
+            : pct >= 50 ? 'Casi lleno'
             : 'Normal';
           const flipX = planeTooltip.screenX > 700;
           const flipY = planeTooltip.screenY > 400;

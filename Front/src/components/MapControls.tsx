@@ -51,13 +51,13 @@ const FilterCheck: React.FC<{
 const HUB_ROWS: { key: HubBucket; color: string; label: string }[] = [
   { key: 'empty',    color: '#94a3b8', label: 'Almacén vacío' },
   { key: 'optimal',  color: '#10b981', label: 'Almacén óptimo' },
-  { key: 'alert',    color: '#f59e0b', label: 'En alerta (>70%)' },
-  { key: 'critical', color: '#ef4444', label: 'Punto crítico (>90%)' },
+  { key: 'alert',    color: '#f59e0b', label: 'En alerta (>50%)' },
+  { key: 'critical', color: '#ef4444', label: 'Punto crítico (>70%)' },
 ];
 const PLANE_ROWS: { key: PlaneBucket; color: string; label: string }[] = [
   { key: 'empty',    color: '#94a3b8', label: 'Vacío / sin carga' },
   { key: 'normal',   color: '#10b981', label: 'Carga normal' },
-  { key: 'high',     color: '#f59e0b', label: 'Casi lleno (>60%)' },
+  { key: 'high',     color: '#f59e0b', label: 'Casi lleno (>50%)' },
   { key: 'critical', color: '#b91c1c', label: 'Capacidad crítica' },
 ];
 const ROUTE_ROWS: { key: RouteBucket; color: string; label: string; swatch: 'line' | 'dash' }[] = [

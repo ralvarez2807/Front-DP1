@@ -196,8 +196,8 @@ Ambas vistas comparten el mismo `MapProvider` (proyección Mercator D3, `MAP_VIE
 Diamante (rectángulo rotado 45°) con cruz de pistas interior. Color por ocupación de almacén:
 - Gris `#94a3b8` — vacío
 - Verde `#10b981` — óptimo
-- Ámbar `#f59e0b` — alerta (>70%)
-- Rojo `#ef4444` — crítico (>90%)
+- Ámbar `#f59e0b` — alerta (>50%)
+- Rojo `#ef4444` — crítico (>70%)
 
 Al seleccionar un aeropuerto → color índigo `#6366f1` + halo con anillo punteado. Hacer click hace zoom x5 al hub.
 
@@ -216,8 +216,8 @@ Al seleccionar un aeropuerto → color índigo `#6366f1` + halo con anillo punte
 Color del avión por carga (`getPlaneColor`, idéntica en ambas copias):
 - Azul `#2563eb` — sin datos de capacidad
 - Verde `#10b981` — normal
-- Ámbar `#f59e0b` — casi lleno (70-90%)
-- Rojo oscuro `#b91c1c` — crítico (≥90%) — **deliberadamente distinto** del rojo de rutas/hubs
+- Ámbar `#f59e0b` — casi lleno (50-70%)
+- Rojo oscuro `#b91c1c` — crítico (≥70%) — **deliberadamente distinto** del rojo de rutas/hubs
   (`#ef4444`); con el rojo estándar el avión se perdía visualmente contra las líneas de ruta
   activas del mismo color
 - Violeta `#8b5cf6` — avión seleccionado (`highlighted`) — deliberadamente distinto del ámbar
@@ -473,8 +473,8 @@ primero si ese endpoint ya existe en el backend.
 
 - **Indicadores globales (LE-101/102, G01–G04):** `OccupancyStat` en el header (`App.tsx`) para
   Simulación y Día a Día + tarjetas en el panel desplegable. El backend manda el % crudo; el
-  semáforo lo pinta el front con los umbrales del `occupancyLevel` del backend (0 vacío, ≤60
-  verde, ≤85 ámbar, >85 rojo). Los campos son opcionales en `DashboardMetrics`/`OpsMetrics`
+  semáforo lo pinta el front con los umbrales del `occupancyLevel` del resto de la UI (0 vacío, ≤50
+  verde, ≤70 ámbar, >70 rojo). Los campos son opcionales en `DashboardMetrics`/`OpsMetrics`
   (muestran "—" si el backend aún no los manda).
 - **Relojes C12–C16:** el bloque de reloj del header muestra SIEMPRE el momento real y, en las
   vistas con sesión (Simulación y Dashboard/ops), el momento simulado al minuto en una segunda

@@ -12,9 +12,9 @@ import { MAP_VIEWBOX } from '../providers/MapProvider';
 // Cada bucket corresponde 1:1 con un color visible en el mapa, para que filtrar
 // oculte EXACTAMENTE lo que se está pintando.
 
-// Aeropuertos — por ocupación de almacén (umbrales 90/70, igual que el render).
+// Aeropuertos — por ocupación de almacén (umbrales 70/50, igual que el render).
 export type HubBucket = 'empty' | 'optimal' | 'alert' | 'critical';
-// Aviones — por carga (umbrales 60/85, igual que getPlaneColor). 'empty' = avión
+// Aviones — por carga (umbrales 70/50, igual que getPlaneColor). 'empty' = avión
 // gris (viaja vacío / sin dato de capacidad).
 export type PlaneBucket = 'empty' | 'normal' | 'high' | 'critical';
 // Rutas — activa (hay avión) vs disponible (línea de fondo).
@@ -41,11 +41,11 @@ export const DEFAULT_MAP_FILTERS: MapFilters = {
 /**
  * Bucket de color de un aeropuerto según su ocupación de almacén.
  * Debe coincidir con el `storageColor` inline de las vistas:
- *   pct>=90 rojo · pct>=70 ámbar · storage==0 gris · resto verde.
+ *   pct>=70 rojo · pct>=50 ámbar · storage==0 gris · resto verde.
  */
 export function hubColorBucket(pct: number, currentStorage: number): HubBucket {
-  if (pct >= 90) return 'critical';
-  if (pct >= 70) return 'alert';
+  if (pct >= 70) return 'critical';
+  if (pct >= 50) return 'alert';
   if (currentStorage <= 0) return 'empty';
   return 'optimal';
 }
@@ -65,7 +65,7 @@ export function isHubHiddenByFilter(
 
 /**
  * Bucket de color de un avión según su carga.
- * Debe coincidir con `getPlaneColor` (umbrales 60/85). El avión gris (viaja vacío,
+ * Debe coincidir con `getPlaneColor` (umbrales 70/50). El avión gris (viaja vacío,
  * occupied<=0) y el azul poco frecuente de "sin dato de capacidad" (capacity<=0) se
  * agrupan en 'empty' — ambos representan "sin carga útil" y se filtran juntos.
  */
@@ -73,8 +73,8 @@ export function planeColorBucket(occupied: number, capacity: number): PlaneBucke
   if (capacity <= 0) return 'empty';   // azul "sin datos" — raro en la práctica
   if (occupied <= 0) return 'empty';   // gris "vacío"
   const pct = (occupied / capacity) * 100;
-  if (pct >= 85) return 'critical';
-  if (pct >= 60) return 'high';
+  if (pct >= 70) return 'critical';
+  if (pct >= 50) return 'high';
   return 'normal';
 }
 
